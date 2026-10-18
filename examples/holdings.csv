@@ -1,0 +1,4 @@
+symbol,quantity,price,asset_type,sector,previous_close
+AAPL,10,200,stock,Technology,198
+VTI,20,250,etf,,249
+CASH,1000,1,cash,,

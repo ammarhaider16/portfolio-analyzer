@@ -1,0 +1,244 @@
+{
+  "$defs": {
+    "PortfolioSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "title": "As Of",
+          "type": "string"
+        },
+        "positions": {
+          "items": {
+            "$ref": "#/$defs/Position"
+          },
+          "maxItems": 1000,
+          "title": "Positions",
+          "type": "array"
+        },
+        "cash": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Cash"
+        },
+        "source": {
+          "default": "supplied",
+          "title": "Source",
+          "type": "string"
+        },
+        "account_id": {
+          "default": "portfolio",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "unsupported": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unsupported",
+          "type": "array"
+        }
+      },
+      "required": [
+        "as_of"
+      ],
+      "title": "PortfolioSnapshot",
+      "type": "object"
+    },
+    "Position": {
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "maxLength": 40,
+          "minLength": 1,
+          "title": "Symbol",
+          "type": "string"
+        },
+        "quantity": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Quantity"
+        },
+        "price": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price"
+        },
+        "asset_type": {
+          "default": "stock",
+          "title": "Asset Type",
+          "type": "string"
+        },
+        "sector": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sector"
+        },
+        "previous_close": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Close"
+        }
+      },
+      "required": [
+        "symbol",
+        "quantity"
+      ],
+      "title": "Position",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "snapshot": {
+      "$ref": "#/$defs/PortfolioSnapshot"
+    },
+    "previous_snapshot": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PortfolioSnapshot"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "question": {
+      "default": "",
+      "maxLength": 4000,
+      "title": "Question",
+      "type": "string"
+    },
+    "include_suggestions": {
+      "default": false,
+      "title": "Include Suggestions",
+      "type": "boolean"
+    },
+    "investment_profile": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Investment Profile"
+    },
+    "benchmark": {
+      "default": "SPY",
+      "maxLength": 40,
+      "title": "Benchmark",
+      "type": "string"
+    },
+    "report_length": {
+      "default": "brief",
+      "enum": [
+        "brief",
+        "detailed"
+      ],
+      "title": "Report Length",
+      "type": "string"
+    },
+    "max_searches": {
+      "default": 8,
+      "maximum": 30,
+      "minimum": 0,
+      "title": "Max Searches",
+      "type": "integer"
+    },
+    "max_seconds": {
+      "default": 120,
+      "maximum": 600,
+      "minimum": 1,
+      "title": "Max Seconds",
+      "type": "integer"
+    },
+    "max_data_age_hours": {
+      "default": 72,
+      "maximum": 8760,
+      "minimum": 1,
+      "title": "Max Data Age Hours",
+      "type": "integer"
+    },
+    "position_review_threshold_pct": {
+      "default": 25,
+      "exclusiveMinimum": 0,
+      "maximum": 100,
+      "title": "Position Review Threshold Pct",
+      "type": "number"
+    },
+    "sector_review_threshold_pct": {
+      "default": 40,
+      "exclusiveMinimum": 0,
+      "maximum": 100,
+      "title": "Sector Review Threshold Pct",
+      "type": "number"
+    },
+    "reporting_cutoff": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reporting Cutoff"
+    }
+  },
+  "required": [
+    "snapshot"
+  ],
+  "title": "AnalysisRequest",
+  "type": "object"
+}

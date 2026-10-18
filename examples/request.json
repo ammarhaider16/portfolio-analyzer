@@ -1,0 +1,31 @@
+{
+  "snapshot": {
+    "as_of": "2026-10-18T12:00:00Z",
+    "source": "supplied-example",
+    "account_id": "example-portfolio",
+    "cash": "2500.00",
+    "positions": [
+      {"symbol": "VTI", "quantity": "30", "price": "280.00", "previous_close": "278.00", "asset_type": "etf"},
+      {"symbol": "BND", "quantity": "50", "price": "74.00", "previous_close": "73.90", "asset_type": "etf"},
+      {"symbol": "AAPL", "quantity": "10", "price": "225.00", "previous_close": "222.00", "sector": "Technology"}
+    ],
+    "unsupported": []
+  },
+  "question": "Explain concentration, portfolio coverage, and relevant upcoming events.",
+  "include_suggestions": false,
+  "investment_profile": {
+    "objectives": "Long-term capital growth with a diversified allocation",
+    "horizon": "10 years",
+    "risk_tolerance": "Moderate; avoid large single-stock concentrations",
+    "liquidity_needs": "Emergency reserves are held separately",
+    "allocation_targets": {"stocks": 80, "bonds": 20},
+    "restrictions": []
+  },
+  "benchmark": "SPY",
+  "report_length": "brief",
+  "max_searches": 4,
+  "max_seconds": 60,
+  "max_data_age_hours": 72,
+  "position_review_threshold_pct": 25,
+  "sector_review_threshold_pct": 40
+}

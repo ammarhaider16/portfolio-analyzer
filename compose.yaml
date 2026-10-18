@@ -1,0 +1,39 @@
+services:
+  portfolio:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    environment:
+      PORTFOLIO_PUBLIC_URL: ${PORTFOLIO_PUBLIC_URL:?Set the HTTPS origin of your reverse proxy}
+      PORTFOLIO_SECRET_OWNER_PASSWORD_FILE: /run/secrets/owner_password
+      PORTFOLIO_SECRET_API_TOKEN_FILE: /run/secrets/api_token
+      PORTFOLIO_SECRET_MODEL_API_KEY_FILE: /run/secrets/model_api_key
+      PORTFOLIO_SECRET_TAVILY_API_KEY_FILE: /run/secrets/tavily_api_key
+      PORTFOLIO_SECRET_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    secrets:
+      - owner_password
+      - api_token
+      - model_api_key
+      - tavily_api_key
+      - smtp_password
+    volumes:
+      - portfolio-data:/data
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+secrets:
+  owner_password:
+    file: ./deployment-secrets/owner_password
+  api_token:
+    file: ./deployment-secrets/api_token
+  model_api_key:
+    file: ./deployment-secrets/model_api_key
+  tavily_api_key:
+    file: ./deployment-secrets/tavily_api_key
+  smtp_password:
+    file: ./deployment-secrets/smtp_password
+volumes:
+  portfolio-data:

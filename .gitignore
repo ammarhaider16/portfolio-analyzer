@@ -1,4 +1,12 @@
 # Byte-compiled / optimized / DLL files
+.tools/
+# Keep security review artifacts local if a reviewer uses the old paths.
+/docs/security-review*.md
+/docs/security-dependency-audit*.json
+deployment-secrets/
+*.sqlite3*
+settings.json
+report.html
 __pycache__/
 *.py[codz]
 *$py.class
