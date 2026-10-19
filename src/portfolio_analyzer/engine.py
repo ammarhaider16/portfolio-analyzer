@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from .metrics import calculate_metrics
 from .models import AnalysisRequest, AnalysisResult, Finding, InvestmentProfile, Position, PortfolioSnapshot
+from .news import cluster_stories
 
 
 _LEGAL_SUFFIX = re.compile(r"\b(?:incorporated|inc|corp(?:oration)?|company|co|ltd|limited|plc|llc|lp|holdings?|group|trust|n\.?a|s\.?a|ag|n\.?v|se)\b\.?", re.I)
@@ -110,6 +111,10 @@ async def _resolve_identities(snapshot: PortfolioSnapshot, market_data, budget_s
 
 async def _search_events(provider, query: str, max_results: int, cutoff, symbol: str | None = None, name: str | None = None):
     # Feed providers can address a symbol directly; the symbolic query stays the fallback.
+    if symbol and hasattr(provider, "search_symbol_candidates"):
+        return await provider.search_symbol_candidates(symbol, name, max_results=max_results, reporting_cutoff=cutoff)
+    if not symbol and hasattr(provider, "search_events_candidates"):
+        return await provider.search_events_candidates(query, max_results=max_results, reporting_cutoff=cutoff)
     if symbol and hasattr(provider, "search_symbol"):
         return await provider.search_symbol(symbol, name, max_results=max_results, reporting_cutoff=cutoff)
     if hasattr(provider, "search_events"):
@@ -131,6 +136,11 @@ def _coverage(result: AnalysisResult, request: AnalysisRequest, dependencies) ->
     position_news = metrics.get("position_news", [])
     cited = [finding for finding in result.findings if finding.evidence_ids]
     issues = []
+    from .providers import source_diagnostics
+    outcomes = source_diagnostics(dependencies.research) if dependencies.research is not None else {}
+    for source_name, outcome in outcomes.items():
+        if outcome.get("status") in {"skipped", "failed"}:
+            issues.append({"code": f"source_{outcome['status']}", "message": f"{source_name}: {outcome.get('reason') or outcome['status']}", "action": "research"})
     if missing:
         issues.append({"code": "missing_prices", "message": f"{', '.join(missing[:8])} {'and others ' if len(missing) > 8 else ''}excluded from value and allocation; add prices.", "action": "portfolio"})
     if unsupported:
@@ -183,7 +193,7 @@ def _coverage(result: AnalysisResult, request: AnalysisRequest, dependencies) ->
             "unresolved_symbols": unresolved, "event_state": event_state,
             "narrative_state": narrative_state, "verified_source_count": len(verified),
             "headline_only_evidence": headline_only_evidence,
-            "position_news": position_news, "issues": issues}
+            "position_news": position_news, "source_outcomes": outcomes, "issues": issues}
 
 
 @dataclass
@@ -323,12 +333,23 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                  "asset_type": position.asset_type, "instrument_name": position.instrument_name,
                  "sector": position.sector} for position in snapshot.positions]
             result.metrics["setup_news_status"] = "unavailable" if dependencies.research is None or not request.max_searches else "not_checked"
+            result.metrics["setup_news_reason"] = "research_disabled" if dependencies.research is None or not request.max_searches else None
             if dependencies.research is not None and request.max_searches:
-                focus_symbols = sorted(positions, key=lambda symbol: float(result.metrics["position_values"].get(symbol, 0)), reverse=True)
+                values = result.metrics["position_values"]
+                focus_symbols = sorted(positions, key=lambda symbol: (symbol not in values, -float(values.get(symbol, 0)), symbol))
+                result.metrics["position_news_display_order"] = focus_symbols
                 seen = set()
                 retrieval_failed = False
                 research_failed = False
-                broad_search = request.max_searches >= 3 and len(focus_symbols) >= 2 and request.max_searches > len(focus_symbols)
+                from .providers import supports_market_news
+                broad_capable = supports_market_news(dependencies.research)
+                broad_search = request.max_searches >= 3 and len(focus_symbols) >= 2 and request.max_searches > len(focus_symbols) and broad_capable
+                if len(focus_symbols) < 2:
+                    result.metrics["setup_news_reason"] = "insufficient_holdings"
+                elif not broad_capable:
+                    result.metrics["setup_news_reason"] = "unsupported_provider"
+                elif not broad_search:
+                    result.metrics["setup_news_reason"] = "budget_exhausted"
                 source_limit = 62
                 async def search_position(symbol):
                     position = positions[symbol]
@@ -336,14 +357,14 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                     focus = "latest earnings filings material news fund holdings changes"
                     query = f'"{name}" {symbol} {focus}' if name else f'"{symbol}" ticker {focus}'
                     try:
-                        candidates = await _search_events(dependencies.research, query, 4, request.reporting_cutoff, symbol=symbol, name=name)
+                        candidates = await _search_events(dependencies.research, query, 12, request.reporting_cutoff, symbol=symbol, name=name)
                     except Exception:
                         return symbol, [], False, True
                     matched = []
                     failed_retrieval = False
                     # Compare against the current time so items published during this run are not dropped.
                     reference = request.reporting_cutoff or datetime.now(timezone.utc)
-                    for source in sorted(candidates[:4], key=lambda item: item.published_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
+                    for source in candidates[:36]:
                         if source.published_at is not None and source.published_at > reference:
                             continue
                         if request.reporting_cutoff and source.published_at is None:
@@ -358,8 +379,6 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                                 failed_retrieval = True
                         if _entity_matches(source, position):
                             matched.append(source)
-                        if len(matched) >= 2:
-                            break
                     return symbol, matched, failed_retrieval, False
 
                 selected = focus_symbols[:request.max_searches - int(broad_search)]
@@ -372,9 +391,18 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                             news_by_symbol[symbol]["status"] = "search_failed"
                             continue
                         position = positions[symbol]
-                        for source in matched:
+                        ranked_stories = cluster_stories(matched, symbol)
+                        ordered_ids = [identifier for story in ranked_stories for identifier in story["member_source_ids"]]
+                        matched_by_id = {source.id: source for source in matched}
+                        for identifier in ordered_ids:
+                            source = matched_by_id[identifier]
                             if source.url in seen:
                                 existing = next((item for item in result.sources if item.url == source.url), None)
+                                strength = {"official_feed": 2, "retrieved_page": 2, "news_feed": 1}
+                                if existing and strength.get(source.content_type, 0) > strength.get(existing.content_type, 0):
+                                    upgraded = source.model_copy(update={"id": existing.id})
+                                    result.sources[result.sources.index(existing)] = upgraded
+                                    existing = upgraded
                                 if existing and _entity_matches(existing, position):
                                     news_by_symbol[symbol]["source_ids"].append(existing.id)
                                 continue
@@ -385,11 +413,16 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                             news_by_symbol[symbol]["source_ids"].append(source.id)
                         ids = news_by_symbol[symbol]["source_ids"]
                         attached = [source for source in result.sources if source.id in ids]
+                        stories = cluster_stories(attached, symbol)
+                        news_by_symbol[symbol]["stories"] = stories[:2]
+                        news_by_symbol[symbol]["additional_stories"] = stories[2:]
                         full_text = any(source.content_type in {"retrieved_page", "official_feed"} for source in attached)
                         headline = any(source.content_type == "news_feed" for source in attached)
                         news_by_symbol[symbol]["status"] = ("verified" if (full_text or headline)
                                                             else "discovery_only" if attached else "no_verified_update")
                         news_by_symbol[symbol]["evidence_grade"] = "full" if full_text else ("headline" if headline else None)
+                if broad_search and len(result.sources) >= source_limit:
+                    result.metrics["setup_news_reason"] = "source_limit"
                 if broad_search and len(result.sources) < source_limit:
                     try:
                         broad = await _search_events(dependencies.research, "recent Federal Reserve economic policy broad stock market material developments", 3, request.reporting_cutoff)
@@ -413,7 +446,27 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                     except Exception:
                         research_failed = True
                         result.metrics["setup_news_status"] = "search_failed"
+                        result.metrics["setup_news_reason"] = "request_failed"
                 result.metrics["setup_news_source_ids"] = list(broad_source_ids)
+                # Later lookups may upgrade a shared URL; refresh earlier holding metadata too.
+                for symbol, entry in news_by_symbol.items():
+                    attached = [source for source in result.sources if source.id in entry["source_ids"]]
+                    if not attached:
+                        continue
+                    stories = cluster_stories(attached, symbol)
+                    entry["stories"], entry["additional_stories"] = stories[:2], stories[2:]
+                    full = any(source.content_type in {"official_feed", "retrieved_page"} for source in attached)
+                    headline = any(source.content_type == "news_feed" for source in attached)
+                    entry["evidence_grade"] = "full" if full else "headline" if headline else None
+                    entry["status"] = "verified" if full or headline else "discovery_only"
+                # A source can affect multiple holdings without being duplicated in raw evidence.
+                all_stories = [story for entry in news_by_symbol.values()
+                               for story in [*entry.get("stories", []), *entry.get("additional_stories", [])]]
+                for story in all_stories:
+                    member_ids = set(story["member_source_ids"])
+                    story["affected_symbols"] = sorted({symbol for other in all_stories
+                                                        if member_ids.intersection(other["member_source_ids"])
+                                                        for symbol in other["affected_symbols"]})
                 if retrieval_failed:
                     result.warnings.append("Some source pages could not be retrieved; their search excerpts are discovery references only.")
                 if research_failed or not result.sources:

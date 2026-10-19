@@ -3,9 +3,12 @@
 import {spawn} from 'node:child_process';
 import {mkdir,writeFile} from 'node:fs/promises';
 import path from 'node:path';
+import {existsSync} from 'node:fs';
 
 const root=process.cwd(), url=process.env.PORTFOLIO_SMOKE_URL||'http://127.0.0.1:8000';
-const executable=process.env.CHROME_PATH||'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const candidates=process.platform==='win32'?['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe']:process.platform==='darwin'?['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']:['/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/usr/bin/chromium','/usr/bin/chromium-browser'];
+const executable=process.env.CHROME_PATH||candidates.find(candidate=>existsSync(candidate));
+if(!executable)throw new Error('Chrome was not found. Set CHROME_PATH to its executable.');
 await mkdir('.tools/browser',{recursive:true});
 const chrome=spawn(executable,['--headless=new','--disable-gpu','--disable-extensions','--disable-background-networking',
   '--disable-component-update','--no-first-run','--no-default-browser-check','--remote-debugging-port=9222',
@@ -38,6 +41,10 @@ try {
   await send('Page.navigate',{url});
   await waitFor('Boolean(document.querySelector("#run-button")) && typeof state !== "undefined" && state !== null');
   if(!(await evaluate('document.title.includes("Betafolio") && Boolean(document.querySelector(".brand-icon")) && Boolean(document.querySelector("#fill-details"))'))) throw new Error('Betafolio branding or draft enrichment action is missing');
+  if(!(await evaluate('!state.settings.sec_company_filings_enabled && !document.querySelector("#research-form input[name=sec_contact]").closest("details:not(#research-setup)") && document.querySelector("#sec-availability").textContent.includes("off")'))) throw new Error('Fresh SEC availability and contact must be visible beside its setting');
+  await evaluate(`document.querySelector('#research-form input[name=sec_contact]').value='Owner owner@example.com';document.querySelector('#research-form input[name=sec_contact]').dispatchEvent(new Event('input'));`);
+  if(!(await evaluate('document.querySelector("#research-form input[name=sec_company_filings_enabled]").checked'))) throw new Error('First valid SEC contact did not enable filings');
+  await evaluate('refresh(true)');
   await evaluate(`state.secrets_present.tavily_api_key=true;state.secrets.tavily_api_key={present:true,source:'keyring',saved_at:new Date().toISOString(),provider:null,editable:true,managed_by:null,env:['PORTFOLIO_SECRET_TAVILY_API_KEY']};renderSecretFields(true)`);
   if(!(await evaluate('document.querySelector("#research-form input[name=key]").hidden && /key saved/i.test(document.querySelector("#tavily-fields .secret-status").textContent)'))) throw new Error('Saved research secret is not masked');
   await evaluate('document.querySelector("#tavily-fields .secret-status .secret-change").click()');

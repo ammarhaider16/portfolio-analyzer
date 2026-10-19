@@ -76,7 +76,7 @@ async def run_analysis(args, directory):
         if args.format == "json":
             print(result.model_dump_json(indent=2))
         else:
-            html, text = render_report(result)
+            html, text = render_report(result, timezone=service.settings.schedule.timezone)
             print(html if args.format == "html" else text)
         return 2 if delivery_failed else (1 if result.status == "failed" else 0)
     except BaseException:

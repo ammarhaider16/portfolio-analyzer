@@ -51,11 +51,9 @@ def safe_error_reason(exc, secret=None):
         return "the provider rate limit was reached (HTTP 429)"
     if isinstance(status, int) and status >= 500:
         return f"the provider returned a server error (HTTP {status})"
-    message = str(exc)
-    if secret:
-        message = message.replace(secret, "***")
-    message = message.splitlines()[0][:180].strip() if message else exc.__class__.__name__
-    return message or exc.__class__.__name__
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return "the provider request timed out; check the connection and retry"
+    return "the provider request failed; check the selected model, credentials, and connection"
 
 
 def secret_kind(name):
@@ -330,6 +328,10 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         current = service.settings
         if set(body) & externally_managed():
             raise ValueError("Change externally managed settings in the deployment environment")
+        if (not current.sec_contact and body.get("sec_contact")
+                and "sec_company_filings_enabled" not in body
+                and "sec_company_filings_enabled" not in externally_managed()):
+            body["sec_company_filings_enabled"] = True
         try:
             updated = Settings.model_validate(current.model_dump() | body)
         except ValidationError as exc:
@@ -464,13 +466,34 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                     except Exception as exc:
                         raise ValueError("The endpoint answered, but it did not return the required structured response: " + safe_error_reason(exc, value)) from None
                 elif kind == "search":
-                    settings = service.settings.model_copy(update={"model_enabled": False, "primary_feeds_enabled": False})
+                    from .providers import probe_research_sources
+                    settings = service.settings.model_copy(update={"model_enabled": False})
                     dep = build_dependencies(settings, service.secrets, tavily_key=value) if value is not None else build_dependencies(settings, service.secrets)
-                    if not dep.research:
-                        raise ValueError("Choose a search provider and add its key if required")
-                    results = await dep.research.search("Federal Reserve latest policy announcement", max_results=1)
-                    if not results:
-                        raise ValueError("Search returned no results")
+                    snapshot = service.store.snapshot()
+                    position = snapshot.positions[0] if snapshot and snapshot.positions else None
+                    outcomes = await probe_research_sources(dep.research, symbol=position.symbol if position else "AAPL",
+                                                           name=position.instrument_name if position else None)
+                    tested_at = datetime.now(timezone.utc).isoformat()
+                    enabled = settings.search_provider != "disabled"
+                    configured = {
+                        "search": enabled and settings.search_provider != "disabled",
+                        "official_feeds": enabled and settings.primary_feeds_enabled,
+                        "sec_filings": enabled and settings.sec_company_filings_enabled,
+                        "ticker_news": enabled and settings.ticker_news_enabled,
+                        "alpha_vantage": enabled and settings.alpha_vantage_enabled,
+                    }
+                    for source, active in configured.items():
+                        if source not in outcomes:
+                            outcomes[source] = {"status": "skipped" if active else "disabled",
+                                                "reason": "Source is not configured or its credential is missing" if active else "Disabled in research settings",
+                                                "tested_at": tested_at}
+                    statuses = [item["status"] for item in outcomes.values() if item["status"] != "disabled"]
+                    aggregate = ("partial" if any(status in {"failed", "skipped"} for status in statuses)
+                                 else "passed" if statuses else "disabled")
+                    tests = service.store.get("connection_tests", {})
+                    tests[kind] = {"status": aggregate, "tested_at": tested_at, "sources": outcomes}
+                    service.store.set("connection_tests", tests)
+                    return {"ok": True, "message": "Source checks complete; review each source outcome.", "sources": outcomes}
         except HTTPException:
             raise
         except ValueError:
@@ -580,7 +603,8 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         row = service.store.run(run_id)
         if not row or not row["result"]:
             raise HTTPException(404, "Completed report not found")
-        html, text = render_report(AnalysisResult.model_validate_json(row["result"]), embed=embed)
+        html, text = render_report(AnalysisResult.model_validate_json(row["result"]), embed=embed,
+                                   timezone=service.settings.schedule.timezone)
         return PlainTextResponse(text) if plain else HTMLResponse(html)
 
     @app.post("/api/runs/{run_id}/send")

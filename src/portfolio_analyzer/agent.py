@@ -34,6 +34,8 @@ async def generate_narrative(model, request, metrics, sources) -> ResearchNarrat
     bounded_metrics = dict(metrics)
     bounded_metrics.pop("position_details", None)
     bounded_metrics.pop("position_news", None)
+    for key in ("position_news_display_order", "source_outcomes", "setup_news_reason"):
+        bounded_metrics.pop(key, None)
     for key in ("position_values", "weights_pct", "daily_price_contributions", "market_data_as_of", "instrument_identity"):
         bounded_metrics[key] = {symbol: value for symbol, value in metrics.get(key, {}).items() if symbol in top_symbols}
     for key in ("missing_prices", "unsupported", "supplied_price_timestamp_unknown"):

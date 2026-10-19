@@ -425,7 +425,8 @@ class ApplicationService:
         if not self.store.claim_delivery(run_id):
             raise ValueError("Delivery already attempted; check its status before sending another copy")
         try:
-            outcome = await asyncio.to_thread(send_report, AnalysisResult.model_validate_json(row["result"]), settings.smtp, password, verified)
+            outcome = await asyncio.to_thread(send_report, AnalysisResult.model_validate_json(row["result"]), settings.smtp, password, verified,
+                                             settings.schedule.timezone)
         except BaseException:
             self.store.update_run(run_id, delivery="uncertain")
             raise

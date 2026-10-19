@@ -6,10 +6,11 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from platformdirs import user_data_path
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .delivery import SMTPConfig
 from .scheduling import SchedulePolicy
+from .source_status import valid_sec_contact
 
 
 class ModelConfig(BaseModel):
@@ -44,7 +45,7 @@ class Settings(BaseModel):
     auto_prices_enabled: bool = True
     price_refresh_minutes: int = Field(default=15, ge=1, le=1440)
     primary_feeds_enabled: bool = True
-    sec_company_filings_enabled: bool = True
+    sec_company_filings_enabled: bool = False
     ticker_news_enabled: bool = True
     news_feed_sources: list[str] = Field(default_factory=lambda: ["google_news", "nasdaq"])
     alpha_vantage_enabled: bool = False
@@ -61,6 +62,20 @@ class Settings(BaseModel):
     schedule: SchedulePolicy = Field(default_factory=SchedulePolicy)
     scheduled_email: bool = False
     smtp: SMTPConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_sec_for_contact(cls, data):
+        if isinstance(data, dict) and "sec_company_filings_enabled" not in data and valid_sec_contact(data.get("sec_contact")):
+            data = {**data, "sec_company_filings_enabled": True}
+        return data
+
+    @field_validator("sec_contact")
+    @classmethod
+    def validate_sec_contact(cls, value):
+        if value and not valid_sec_contact(value):
+            raise ValueError("Enter an identifying contact containing an email address, e.g. Your name contact@example.com")
+        return value.strip()
 
     @field_validator("investment_profile")
     @classmethod
@@ -103,6 +118,12 @@ def load_settings(directory: Path) -> Settings:
             data[key] = value
     # Ignore obsolete connector configuration from pre-manual-portfolio installations.
     data.pop("broker_account_id", None)
+    # Retain invalid legacy contacts for a corrective dashboard notice, without
+    # letting them bypass the provider's independent request guard.
+    legacy_contact = data.get("sec_contact", "")
+    if legacy_contact and not valid_sec_contact(legacy_contact):
+        settings = Settings.model_validate({**data, "sec_contact": ""})
+        return settings.model_copy(update={"sec_contact": legacy_contact})
     return Settings.model_validate(data)
 
 

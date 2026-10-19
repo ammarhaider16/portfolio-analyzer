@@ -256,4 +256,4 @@ def test_build_dependencies_keeps_keyless_fallback_when_feeds_off(tmp_path):
     dependencies = build_dependencies(settings, SecretStore(tmp_path, server=True))
     names = [provider.__class__.__name__ for provider in dependencies.research.providers]
     assert names[0] == "DDGSResearchProvider"
-    assert "SecFilingsResearchProvider" in names and "TickerNewsFeedProvider" in names
+    assert "SecFilingsResearchProvider" not in names and "TickerNewsFeedProvider" in names

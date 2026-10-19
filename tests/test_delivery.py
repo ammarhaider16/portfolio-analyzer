@@ -34,7 +34,7 @@ def test_professional_report_has_accessible_metrics_and_risk_sections():
     assert '<th scope="row"' in html and "<caption" in html
     assert "$123,456.78" in html and "$123,456.78" in plain
     assert "25.00%" in html and "25.00%" in plain
-    for title in ("What matters now", "Portfolio at a glance", "Limits of this briefing"):
+    for title in ("What matters now", "Portfolio at a glance", "Data notes"):
         assert title in html and title in plain
     assert "cash_weight_pct" not in html
     assert "Status: " not in plain
@@ -52,8 +52,8 @@ def test_embed_drops_page_title_but_keeps_plain_text_and_sections():
     assert default_plain.startswith("Betafolio briefing")
     assert "Bottom line" in embed_html
     assert "2 of 3 holdings valued" in embed_html
-    assert "What to do next" in embed_html
-    assert "No action is needed right now" in embed_html
+    assert "What to do next" not in embed_html
+    assert "Data notes" not in embed_html
 
 
 def test_report_lists_actionable_next_steps_for_coverage_issues():
@@ -62,14 +62,14 @@ def test_report_lists_actionable_next_steps_for_coverage_issues():
             {"code": "missing_prices", "message": "MSFT excluded from value and allocation; add prices.",
              "action": "portfolio"}]}})
     html, plain = render_report(report)
-    assert "What to do next" in html and "What to do next" in plain
+    assert "Data notes" in html and "Data notes" in plain
     assert "Review holdings and cash" in plain
 
 
 def test_percentage_view_omits_amounts_and_narrative():
     html, plain = render_report(result(), percent_only=True)
     assert "123456" not in html + plain
-    assert "Cash allocation: 0.25" in plain
+    assert "Cash allocation: 25%" in plain
     assert "Evidence" not in plain
 
 
@@ -77,7 +77,95 @@ def test_percentage_view_preserves_named_weight_maps():
     report = result()
     report.metrics["weights_pct"] = {"AAPL": 25.0}
     _, plain = render_report(report, percent_only=True)
-    assert "Holding allocations / AAPL: 25.00%" in plain
+    assert "Holding allocations / AAPL: 25%" in plain
+
+
+@pytest.mark.parametrize(("timestamp", "expected"), [
+    ("2026-10-19T15:43:56.123456Z", "Oct 19, 2026, 11:43 AM EDT"),
+    ("2026-01-19T15:43:00Z", "Jan 19, 2026, 10:43 AM EST"),
+])
+def test_report_human_dates_and_dst(timestamp, expected):
+    report = {"snapshot_as_of": timestamp}
+    html, plain = render_report(report)
+    assert expected in html and expected in plain
+    assert timestamp not in html + plain
+    assert "3:43 PM UTC" in render_report(report, timezone="UTC")[1]
+
+
+def test_holding_table_labels_rounding_date_and_brief_change():
+    report = {"report_length": "detailed", "metrics": {
+        "position_details": [
+            {"symbol": "AAPL", "price": "205.123", "previous_close": "200", "sector": "Tech"},
+            {"symbol": "MSFT", "price": "300", "previous_close": "0"}],
+        "market_data_as_of": {"AAPL": {"trading_date": "2026-10-16"}},
+        "position_news": [{"symbol": "AAPL"}, {"symbol": "MSFT"}]}}
+    html, plain = render_report(report)
+    assert '<th scope="col">Previous close</th>' in html
+    assert '<th scope="row">AAPL</th>' in html
+    assert "$205.12" in html and "$205.12" in plain
+    assert "+2.56%" in html and "Oct 16, 2026" in html
+    assert "previous close unavailable" not in plain
+    report["report_length"] = "brief"
+    html, plain = render_report(report)
+    assert "AAPL +2.6% vs prior close" in html and "AAPL +2.6% vs prior close" in plain
+    assert "MSFT +" not in plain
+
+
+def test_percentage_history_estimate_is_labeled_and_private():
+    report = {"metrics": {"historical_risk": {"annualized_volatility_pct": 12.3456},
+                          "known_value": 987654, "weights_pct": {"AAPL": 10.999}},
+              "findings": [{"title": "Secret narrative", "detail": "$987654"}],
+              "sources": [{"id": "x", "url": "https://secret.example"}]}
+    html, plain = render_report(report, percent_only=True)
+    assert "(historical estimate): 12.3%" in plain
+    assert "AAPL: 11%" in plain
+    assert "987654" not in html + plain and "secret.example" not in html + plain
+
+
+def test_cluster_rendering_related_sources_order_and_opaque_link_privacy():
+    report = {"metrics": {
+        "position_news_display_order": ["MSFT", "AAPL"],
+        "position_news": [
+            {"symbol": "AAPL", "stories": []},
+            {"symbol": "MSFT", "stories": [{"representative_source_id": "wire",
+                "member_source_ids": ["wire", "other"], "category": "event", "evidence_grade": "headline",
+                "publisher_domain": "reuters.com", "publisher_tier": "major"}],
+             "additional_stories": [{"representative_source_id": "other", "category": "also"}]}],
+        "setup_news_reason": "insufficient_holdings"},
+        "sources": [{"id": "wire", "title": "Results beat estimates", "url": "https://news.google.com/rss/articles/opaque",
+                     "published_at": "2026-10-19", "content_type": "news_feed"},
+                    {"id": "other", "title": "Related result", "url": "https://example.com/result"}]}
+    html, plain = render_report(report)
+    assert html.index("<h3>MSFT") < html.index("<h3>AAPL")
+    assert "Events" in html and "plus 1 related reports" in html and "More stories" in html
+    assert "reuters.com" in html and "headline only, not verified" in html
+    assert "news.google.com/rss/articles" not in plain
+    assert "link available in the dashboard" in plain
+    assert "at least two holdings" in plain
+
+
+def test_data_notes_show_two_then_expand_and_keep_plain_text_complete():
+    report = {"coverage": {"issues": [
+        {"message": f"Missing data {number}"} for number in range(5)]}}
+    html, plain = render_report(report)
+    start = html.index('<h2>Data notes</h2>')
+    assert html[start:].split('<details>')[0].count('<p>') == 2
+    assert '<summary>3 more data notes</summary>' in html
+    assert "Missing data 4" in plain
+
+
+def test_failed_retrieval_excerpt_remains_discovery_even_with_story_metadata():
+    report = {"metrics": {"position_news": [{"symbol": "AAPL", "status": "discovery_only",
+        "stories": [{"representative_source_id": "failed", "member_source_ids": ["failed"],
+                     "evidence_grade": "full", "category": "also"}]}]},
+        "sources": [{"id": "failed", "title": "Apple earnings preview", "content_type": "search_excerpt",
+                     "evidence_grade": "full", "url": "https://example.org/blocked-article"}]}
+    html, plain = render_report(report)
+    assert "Apple earnings preview" in html
+    assert "discovery only, not verified" in html and "discovery only, not verified" in plain
+    assert "full source" not in html + plain
+    assert "AAPL: relevant headlines were found but not verified" in html
+    assert "AAPL: relevant headlines were found but not verified" in plain
 
 
 @pytest.mark.parametrize("address", ["a@b.org\r\nBcc:evil@b.org", "a@b.org,b@b.org", "Name <a@b.org>"])

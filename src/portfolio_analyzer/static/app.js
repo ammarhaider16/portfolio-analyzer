@@ -95,7 +95,7 @@ function view(name, updateHash=true) {
   window.scrollTo({top:0, behavior:'smooth'});
 }
 document.querySelectorAll('[data-view]').forEach(el => el.addEventListener('click', () => view(el.dataset.view)));
-function dateLabel(value) { return value ? new Date(value).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}) : 'On demand'; }
+function dateLabel(value) { return value ? new Date(value).toLocaleString('en-US', {year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZone:state?.settings?.schedule?.timezone||'America/New_York',timeZoneName:'short'}) : 'On demand'; }
 function button(label, callback, className='text-button') { const el=document.createElement('button'); el.textContent=label; el.className=className; el.addEventListener('click',action(callback)); return el; }
 function sizeReportFrame() {
   // The embedded report is self-contained and same-origin, so match its height and
@@ -149,8 +149,8 @@ function renderReportSummary(row) {
   const news=coverage.position_news||(result.metrics&&result.metrics.position_news)||[];
   if(news.length){const newsTitle=document.createElement('h3');newsTitle.textContent='What we could check for each holding';root.append(newsTitle);root.append(renderNewsLegend(news));}
   const issues=(coverage.issues||[]).filter(issue=>issue&&issue.message);
-  const nextTitle=document.createElement('h3');nextTitle.textContent='What to do next';root.append(nextTitle);
-  if(issues.length){const issueList=document.createElement('ul');issueList.className='coverage-issues';for(const issue of issues.slice(0,5)){const li=document.createElement('li');li.append(document.createTextNode(issue.message+' '));if(issue.action){const label=issue.action==='portfolio'?'Fix holdings':issue.action==='model'?'Set up a model':'Set up research';const go=button(label,()=>goToIssue(issue.action));go.type='button';li.append(go);}issueList.append(li);}root.append(issueList);}
+  const nextTitle=document.createElement('h3');nextTitle.textContent='Data notes';root.append(nextTitle);
+  if(issues.length){const issueList=document.createElement('ul');issueList.className='coverage-issues';for(const issue of issues.slice(0,2)){const li=document.createElement('li');li.append(document.createTextNode(issue.message+' '));if(issue.action){const label=issue.action==='portfolio'?'Fix holdings':issue.action==='model'?'Set up a model':'Set up research';const go=button(label,()=>goToIssue(issue.action));go.type='button';li.append(go);}issueList.append(li);}root.append(issueList);if(issues.length>2){const extra=document.createElement('details');const summary=document.createElement('summary');summary.textContent=`${issues.length-2} more data notes`;extra.append(summary);for(const issue of issues.slice(2)){const note=document.createElement('p');note.textContent=issue.message;extra.append(note);}root.append(extra);}}
   else {const positive=document.createElement('p');positive.className='insight-context';positive.textContent='Nothing needs your attention right now. Re-run the briefing when your holdings or prices change.';root.append(positive);}
 }
 
@@ -297,7 +297,20 @@ function updateResearchReadiness() {
   $('#cap-events').textContent=!searchConfigured?'Unavailable · set up search':tests.search?.status==='passed'?`Search tested ${dateLabel(tests.search.tested_at)}`:tests.search?.status==='failed'?'Search test failed · retry':'Search configured · test it';
   $('#cap-model').textContent=!modelConfigured?'Unavailable · add a model':tests.model?.status==='passed'?`Model tested ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?'Model test failed · retry':'Model configured · test it';
   $('#model-test-state').textContent=tests.model?.status==='passed'?`Last test passed ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?`Last test failed ${dateLabel(tests.model.tested_at)}`:'Connection not tested';
-  $('#search-test-state').textContent=tests.search?.status==='passed'?`Last test passed ${dateLabel(tests.search.tested_at)}`:tests.search?.status==='failed'?`Last test failed ${dateLabel(tests.search.tested_at)}`:'Connection not tested';
+  const sourceTests=tests.search?.sources;
+  $('#search-test-state').textContent=sourceTests?`Source checks ${dateLabel(tests.search.tested_at)} · see individual outcomes`:tests.search?`Legacy aggregate test: ${tests.search.status}. Retest to check each source.`:'Sources not tested';
+  const chips=$('#source-states');chips.replaceChildren();
+  const enabled=settings.search_provider!=='disabled';
+  const sourceSettings={search:enabled,official_feeds:enabled&&settings.primary_feeds_enabled,sec_filings:enabled&&settings.sec_company_filings_enabled,ticker_news:enabled&&settings.ticker_news_enabled,alpha_vantage:enabled&&settings.alpha_vantage_enabled};
+  const sourceLabels={search:settings.search_provider==='tavily'?'Tavily':'Web search',official_feeds:'Fed / BLS',sec_filings:'SEC filings',ticker_news:'Ticker news',alpha_vantage:'Alpha Vantage'};
+  for(const [name,active] of Object.entries(sourceSettings)){
+    const result=sourceTests?.[name];const chip=document.createElement('span');chip.className='badge';
+    const status=result?.status||(!active?'disabled':name==='sec_filings'&&!settings.sec_contact?'skipped':'not tested');
+    chip.textContent=`${sourceLabels[name]}: ${status}`;chip.title=result?.reason||'';
+    if(result?.reason){const detail=document.createElement('small');detail.textContent=` ${result.reason}`;chip.append(detail);}
+    chips.append(chip);
+  }
+  updateSecAvailability();
   $('#tavily-fields').hidden=settings.search_provider!=='tavily';
   const newsSources=$('#news-source-fields'); if(newsSources) newsSources.hidden=!settings.ticker_news_enabled;
   const question=$('#run-form').elements.question.value;
@@ -307,6 +320,14 @@ function updateResearchReadiness() {
   const ideaGap=wantsIdeas&&(!settings.investment_profile||!modelConfigured);
   const warning=$('#question-readiness');warning.hidden=!eventGap&&!ideaGap;
   if(!warning.hidden)warning.textContent=[eventGap?'A recent-events answer needs current-event search and a tested model. This run may show portfolio measures without answering that question.':'',ideaGap?'Adjustment ideas need a complete investment profile and a working model.':''].filter(Boolean).join(' ');
+}
+
+function updateSecAvailability(){
+  const form=$('#research-form');if(!form)return;
+  const contact=form.elements.sec_contact.value.trim();
+  const hasContact=/[^\s@]+@[^\s@]+\.[^\s@]+/.test(contact);
+  const on=form.elements.sec_company_filings_enabled.checked;
+  $('#sec-availability').textContent=!hasContact?(on?'SEC filings will be skipped until an identifying contact (name + email) is added.':'SEC filings are off. Add an identifying contact (name + email) to enable this source.'):(on?'SEC filings are enabled with your identifying contact.':'SEC filings are off. Enable the checkbox to include them.');
 }
 
 function setMailProvider(preserve=false) {
@@ -406,6 +427,7 @@ async function refresh(populate=false) {
     if(managed.length) $('#managed-settings').textContent=`Managed by your deployment (read-only here): ${managed.join(', ')}.`;
   }
   renderSecretFields();
+  updateSecAvailability();
   renderSecretStorage();
   renderHistory(state.history);
   if(latest && ['success','partial'].includes(latest.status) && latest.id!==lastAutoReport && !selectedReport) {openReport(latest.id); lastAutoReport=latest.id;}
@@ -573,6 +595,12 @@ if($('#login-form')) {
   }));
   document.querySelectorAll('[data-test]').forEach(el=>el.addEventListener('click',action(async()=>{el.disabled=true;notice('Testing the saved connection…');try{const result=await api(`/api/test/${el.dataset.test}`,{});notice(result.message);}finally{el.disabled=false;await refresh();}})));
   $('#research-form').elements.search_provider.addEventListener('change',()=>{$('#tavily-fields').hidden=$('#research-form').elements.search_provider.value!=='tavily';});
+  $('#research-form').elements.sec_company_filings_enabled.addEventListener('change',event=>{event.target.dataset.userSelected='true';updateSecAvailability();});
+  $('#research-form').elements.sec_contact.addEventListener('input',event=>{
+    const box=$('#research-form').elements.sec_company_filings_enabled;
+    if(!state.settings.sec_contact&&!box.disabled&&!box.dataset.userSelected&&/[^\s@]+@[^\s@]+\.[^\s@]+/.test(event.target.value))box.checked=true;
+    updateSecAvailability();
+  });
   $('#research-form').elements.ticker_news_enabled.addEventListener('change',()=>{$('#news-source-fields').hidden=!checked('#research-form','ticker_news_enabled');});
   $('#preferences-form').addEventListener('submit',action(async()=>{const data=values('#preferences-form');for(const key of ['position_review_threshold_pct','sector_review_threshold_pct','max_searches','max_seconds','max_data_age_hours','retention_days']) data[key]=Number(data[key]);await save(data);}));
   $('#profile-form').addEventListener('submit',action(async()=>{const data=values('#profile-form');let targets={};try{targets=data.allocation_targets.trim()?JSON.parse(data.allocation_targets):{};}catch{throw new Error('Other targets must be a JSON object, for example {"real_estate":10}.');}if(!targets||Array.isArray(targets)||typeof targets!=='object')throw new Error('Other targets must be a JSON object.');for(const name of ['stocks','bonds','cash']){const raw=data[`target_${name}`].trim();delete data[`target_${name}`];if(raw)targets[name]=Number(raw);}if(!Object.keys(targets).length||Object.values(targets).some(value=>!Number.isFinite(value)||value<0||value>100)||Object.values(targets).reduce((sum,value)=>sum+value,0)>100)throw new Error('Enter targets between 0% and 100% that total no more than 100%.');data.allocation_targets=targets;data.restrictions=data.restrictions.split('\n').map(s=>s.trim()).filter(Boolean);await save({investment_profile:data});}));

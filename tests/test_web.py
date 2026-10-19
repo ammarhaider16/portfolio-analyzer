@@ -30,6 +30,40 @@ def csrf(client):
     return re.search(r'name="csrf-token" content="([^"]+)"', response.text).group(1)
 
 
+def test_sec_contact_save_validation_and_first_enable(tmp_path):
+    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
+        token = csrf(client)
+        assert not client.get('/api/status').json()['settings']['sec_company_filings_enabled']
+        bad = post(client, token, '/api/settings', {'sec_contact': 'John'})
+        assert bad.status_code == 400
+        assert any(error['field'] == 'sec_contact' for error in bad.json()['errors'])
+        assert post(client, token, '/api/settings', {'sec_contact': 'John john@example.com'}).status_code == 200
+        assert client.get('/api/status').json()['settings']['sec_company_filings_enabled']
+        assert post(client, token, '/api/settings', {'sec_company_filings_enabled': False}).status_code == 200
+        assert post(client, token, '/api/settings', {'sec_contact': 'John new@example.com'}).status_code == 200
+        assert not client.get('/api/status').json()['settings']['sec_company_filings_enabled']
+
+
+def test_search_test_persists_each_source_without_masking_skips(tmp_path, monkeypatch):
+    from portfolio_analyzer import providers
+
+    async def probe(*args, **kwargs):
+        return {'search': {'status': 'passed', 'reason': '', 'tested_at': '2026-10-19T12:00:00Z'},
+                'sec_filings': {'status': 'skipped', 'reason': 'Identifying contact missing', 'tested_at': '2026-10-19T12:00:00Z'}}
+
+    monkeypatch.setattr(providers, 'probe_research_sources', probe)
+    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
+        token = csrf(client)
+        response = post(client, token, '/api/test/search', {})
+        assert response.status_code == 200
+        result = client.get('/api/status').json()['connection_tests']['search']
+        assert result['status'] == 'partial'
+        assert result['sources']['search']['status'] == 'passed'
+        assert result['sources']['sec_filings']['status'] == 'skipped'
+        assert post(client, token, '/api/settings', {'ticker_news_enabled': False}).status_code == 200
+        assert 'search' not in client.get('/api/status').json()['connection_tests']
+
+
 def post(client, token, path, body):
     return client.post(path, json=body, headers={'x-csrf-token': token})
 
@@ -321,3 +355,4 @@ def test_safe_error_reason_maps_status_and_redacts():
     assert '401' in safe_error_reason(Unauthorized('nope'))
     redacted = safe_error_reason(Exception('bad key secret-abc'), 'secret-abc')
     assert 'secret-abc' not in redacted
+    assert 'saved-provider-key' not in safe_error_reason(Exception('Invalid saved-provider-key'))
