@@ -4,85 +4,319 @@ import hashlib
 import os
 import secrets as random_secrets
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from .config import load_settings
 from .delivery import send_report, send_verification
 from .engine import EngineDependencies, analyze_portfolio
 from .models import AnalysisRequest, AnalysisResult
-from .providers import DDGSResearchProvider, PrimaryFeedResearchProvider, TavilyResearchProvider, YFinanceMarketDataProvider
+from .providers import (CompositeResearchProvider, DDGSResearchProvider, PrimaryFeedResearchProvider,
+                        SecFilingsResearchProvider, TavilyResearchProvider, TickerNewsFeedProvider,
+                        YFinanceMarketDataProvider)
 from .scheduling import latest_eligible_run
 from .secrets import SecretStore, SecretStorageError
 from .storage import Store
 
 
-def read_secret(store, name):
-    aliases = {"model_api_key": ("LITELLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"), "tavily_api_key": ("TAVILY_API_KEY",), "alpha_vantage_api_key": ("ALPHA_VANTAGE_API_KEY",)}
-    for alias in aliases.get(name, ()):
-        if os.environ.get(alias):
-            return os.environ[alias]
+# Per-provider model key slots. Names must match SecretStore's identifier rule
+# ([a-zA-Z][a-zA-Z0-9_]*) so they map cleanly to PORTFOLIO_SECRET_<NAME>.
+MODEL_PROVIDER_SLOTS = {
+    "colgate": "model_api_key_colgate",
+    "openai": "model_api_key_openai",
+    "anthropic": "model_api_key_anthropic",
+    "custom": "model_api_key_custom",
+}
+# Documented deployment aliases accepted for each provider.
+MODEL_PROVIDER_ALIASES = {
+    "colgate": ("LITELLM_API_KEY",),
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "custom": (),
+}
+SECRET_ALIASES = {
+    "tavily_api_key": ("TAVILY_API_KEY",),
+    "alpha_vantage_api_key": ("ALPHA_VANTAGE_API_KEY",),
+}
+# The shared pre-Phase-3 name, kept readable only to migrate existing installs.
+LEGACY_MODEL_SLOT = "model_api_key"
+
+
+def _read_stored(store, name):
     try:
         return store.get(name)
     except SecretStorageError:
         return None
 
 
-def create_model(settings, secret_store):
-    preferred = {"colgate": "LITELLM_API_KEY", "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(settings.model.provider)
-    try:
-        stored = secret_store.get("model_api_key")
-    except SecretStorageError:
-        stored = None
-    key = stored or (os.environ.get(preferred) if preferred else None)
+def resolve_secret(store, name, aliases=()):
+    """Resolve one secret through the single documented precedence rule.
+
+    Highest precedence first:
+      1. The ``PORTFOLIO_SECRET_<NAME>`` environment variable (deployment managed).
+      2. An absolute ``PORTFOLIO_SECRET_<NAME>_FILE`` mounted file (deployment managed).
+      3. The OS keyring value saved from the dashboard.
+      4. A convenience provider alias environment variable (for example ``OPENAI_API_KEY``).
+
+    Canonical ``PORTFOLIO_SECRET_*`` values are authoritative and read-only. Convenience
+    aliases are only a fallback, so a key saved in the dashboard overrides an ambient alias
+    (such as a stale ``LITELLM_API_KEY`` left in the shell) without being locked out.
+
+    Returns ``(value, source)`` where ``source`` is ``"env"``, ``"file"``, ``"keyring"``,
+    ``"alias"``, or ``None`` when the secret is not configured. ``create_model``,
+    ``build_dependencies`` and ``/api/status`` all resolve through this one helper so the
+    UI, presence indicators, and actual usage can never disagree.
+    """
+    key = "PORTFOLIO_SECRET_" + name.upper()
+    if key in os.environ:
+        return os.environ[key], "env"
+    if key + "_FILE" in os.environ:
+        value = _read_stored(store, name)
+        return (value, "file") if value else (None, None)
+    value = _read_stored(store, name)
+    if value:
+        return value, "keyring"
+    for alias in aliases:
+        if os.environ.get(alias):
+            return os.environ[alias], "alias"
+    return (None, None)
+
+
+def read_secret(store, name):
+    """Return only the resolved value for a secret (thin wrapper over ``resolve_secret``)."""
+    if name == LEGACY_MODEL_SLOT:
+        # Diagnostic helper (CLI): report where any model credential lives.
+        for provider, slot in MODEL_PROVIDER_SLOTS.items():
+            value, _ = resolve_secret(store, slot, MODEL_PROVIDER_ALIASES.get(provider, ()))
+            if value:
+                return value
+        return resolve_secret(store, LEGACY_MODEL_SLOT, ("LITELLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"))[0]
+    return resolve_secret(store, name, SECRET_ALIASES.get(name, ()))[0]
+
+
+def resolve_model_key(settings, secret_store):
+    """Resolve the model key for the selected provider only.
+
+    The active provider's dedicated slot (and its documented alias) is checked
+    first, then the legacy shared ``model_api_key`` for migration. Switching
+    provider therefore never silently reuses another provider's stored key.
+    Returns ``(value, source, used_name)``.
+    """
+    provider = settings.model.provider
+    slot = MODEL_PROVIDER_SLOTS[provider]
+    value, source = resolve_secret(secret_store, slot, MODEL_PROVIDER_ALIASES.get(provider, ()))
+    if value:
+        return value, source, slot
+    value, source = resolve_secret(secret_store, LEGACY_MODEL_SLOT)
+    if value:
+        return value, source, LEGACY_MODEL_SLOT
+    return None, None, slot
+
+
+def model_env_names(provider):
+    """The exact environment variable names honored for a provider's key."""
+    names = ["PORTFOLIO_SECRET_" + MODEL_PROVIDER_SLOTS[provider].upper()]
+    names.extend(MODEL_PROVIDER_ALIASES.get(provider, ()))
+    names.append("PORTFOLIO_SECRET_MODEL_API_KEY")
+    return list(dict.fromkeys(names))
+
+
+def secret_env_names(name, aliases=()):
+    return list(dict.fromkeys(["PORTFOLIO_SECRET_" + name.upper(), *aliases]))
+
+
+def winning_env_name(name, aliases=()):
+    """The deployment variable that currently supplies a secret, if any."""
+    key = "PORTFOLIO_SECRET_" + name.upper()
+    if key in os.environ:
+        return key
+    if key + "_FILE" in os.environ:
+        return key + "_FILE"
+    for alias in aliases:
+        if os.environ.get(alias):
+            return alias
+    return None
+
+
+def describe_secret(store, name, resolved, *, provider, saved_at_name, env_names, aliases=(), server=False):
+    value, source = resolved
+    return {"present": bool(value), "source": source,
+            "saved_at": store.saved_at(saved_at_name) if (source == "keyring" and saved_at_name) else None,
+            "provider": provider, "editable": (not server) and source not in ("env", "file"),
+            "managed_by": winning_env_name(name, aliases) if source in ("env", "file", "alias") else None,
+            "env": list(env_names)}
+
+
+def secret_status(settings, store, server=False):
+    """Structured status for every credential the dashboard can manage."""
+    secrets = {}
+    for provider, slot in MODEL_PROVIDER_SLOTS.items():
+        aliases = MODEL_PROVIDER_ALIASES.get(provider, ())
+        resolved = resolve_secret(store, slot, aliases)
+        secrets[slot] = describe_secret(store, slot, resolved, provider=provider, saved_at_name=slot,
+                                        env_names=model_env_names(provider), aliases=aliases, server=server)
+    value, source, used = resolve_model_key(settings, store)
+    active_aliases = MODEL_PROVIDER_ALIASES.get(settings.model.provider, ()) if used != LEGACY_MODEL_SLOT else ()
+    secrets[LEGACY_MODEL_SLOT] = describe_secret(store, used, (value, source), provider=settings.model.provider,
+                                                 saved_at_name=used, env_names=model_env_names(settings.model.provider),
+                                                 aliases=active_aliases, server=server)
+    for name in ("tavily_api_key", "alpha_vantage_api_key", "smtp_password"):
+        aliases = SECRET_ALIASES.get(name, ())
+        resolved = resolve_secret(store, name, aliases)
+        secrets[name] = describe_secret(store, name, resolved, provider=None, saved_at_name=name,
+                                        env_names=secret_env_names(name, aliases), aliases=aliases, server=server)
+    return secrets
+
+
+def create_model(settings, secret_store, api_key=None):
+    key = api_key
+    if key is None:
+        key, _source, _used = resolve_model_key(settings, secret_store)
     if not key:
         raise ValueError("Add a model API key or configure its environment variable")
     cfg = settings.model
+    # Honor the endpoint the owner configured; fall back to the provider default when blank.
+    provider_defaults = {"colgate": "https://litellm.colgate.edu",
+                         "openai": "https://api.openai.com/v1",
+                         "anthropic": "https://api.anthropic.com"}
+    base = (cfg.base_url or provider_defaults.get(cfg.provider, "")).rstrip("/")
     if cfg.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(model=cfg.model, api_key=key, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=30, max_retries=1)
     from langchain_openai import ChatOpenAI
-    base = {"colgate": "https://litellm.colgate.edu", "openai": "https://api.openai.com/v1"}.get(cfg.provider, cfg.base_url)
     return ChatOpenAI(model=cfg.model, api_key=key, base_url=base, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=30, max_retries=1)
 
 
-class SupplementalResearch:
-    def __init__(self, primary, supplemental):
-        self.primary, self.supplemental = primary, supplemental
-
-    async def search(self, query, max_results=3):
-        results = []
-        for provider in (self.primary, self.supplemental):
-            if provider:
-                try:
-                    results.extend(await provider.search(query, max_results=max_results))
-                except Exception:
-                    if not results and provider is self.supplemental:
-                        raise
-        return list({source.url: source for source in results}.values())[:max_results]
-
-    async def retrieve(self, source):
-        return await self.primary.retrieve(source)
-
-
-def build_dependencies(settings, secret_store):
-    research = None
+def build_research(settings, secret_store, tavily_key=None, alpha_key=None):
+    fallback = None
     if settings.search_provider == "tavily":
-        key = read_secret(secret_store, "tavily_api_key")
+        key = read_secret(secret_store, "tavily_api_key") if tavily_key is None else tavily_key
         if key:
-            research = TavilyResearchProvider(key)
+            fallback = TavilyResearchProvider(key)
     elif settings.search_provider == "keyless":
-        research = DDGSResearchProvider()
-    if settings.primary_feeds_enabled and settings.search_provider != "disabled":
-        research = PrimaryFeedResearchProvider(fallback=research, sec_user_agent=settings.sec_contact or None)
-    if settings.alpha_vantage_enabled:
-        from .providers import AlphaVantageResearchProvider
-        key = read_secret(secret_store, "alpha_vantage_api_key")
-        if key:
-            research = SupplementalResearch(research or PrimaryFeedResearchProvider(), AlphaVantageResearchProvider(key))
-    model = create_model(settings, secret_store) if settings.model_enabled else None
+        fallback = DDGSResearchProvider()
+    providers = []
+    if settings.search_provider != "disabled":
+        sec_user_agent = settings.sec_contact or None
+        if settings.primary_feeds_enabled:
+            providers.append(PrimaryFeedResearchProvider(fallback=fallback, sec_user_agent=sec_user_agent))
+        elif fallback is not None:
+            providers.append(fallback)
+        if settings.sec_company_filings_enabled:
+            providers.append(SecFilingsResearchProvider(sec_user_agent=sec_user_agent))
+        if settings.ticker_news_enabled:
+            providers.append(TickerNewsFeedProvider(sources=settings.news_feed_sources))
+        if settings.alpha_vantage_enabled:
+            from .providers import AlphaVantageResearchProvider
+            key = read_secret(secret_store, "alpha_vantage_api_key") if alpha_key is None else alpha_key
+            if key:
+                providers.append(AlphaVantageResearchProvider(key))
+    return CompositeResearchProvider(providers) if providers else None
+
+
+def build_dependencies(settings, secret_store, model_key=None, tavily_key=None, alpha_key=None):
+    research = build_research(settings, secret_store, tavily_key=tavily_key, alpha_key=alpha_key)
+    model = create_model(settings, secret_store, api_key=model_key) if settings.model_enabled else None
     return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.market_data_enabled else None,
                               instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model)
+
+
+class QuoteService:
+    """Automatic server-side valuation refresh for the saved portfolio.
+
+    Prices are fetched in a batch, written onto the saved snapshot's price fields
+    only (never quantity, cash, or as_of), and recorded in a persisted
+    ``prices_as_of`` map so freshness survives a restart. A short TTL keeps
+    polling responsive while US equities trade and relaxed otherwise.
+    """
+
+    KEY = "prices_as_of"
+    market_hours_ttl = 60
+
+    def __init__(self, store, provider, settings_provider):
+        self.store = store
+        self.provider = provider
+        self.settings_provider = settings_provider
+        self._cache = None
+        self._lock = asyncio.Lock()
+
+    def metadata(self) -> dict:
+        if self._cache is None:
+            self._cache = self.store.get(self.KEY, {}) or {}
+        return self._cache
+
+    @staticmethod
+    def _market_open(now: datetime) -> bool:
+        local = now.astimezone(ZoneInfo("America/New_York"))
+        if local.weekday() >= 5:
+            return False
+        minutes = local.hour * 60 + local.minute
+        return 9 * 60 + 30 <= minutes < 16 * 60
+
+    def ttl_seconds(self, now: datetime | None = None) -> int:
+        now = now or datetime.now(timezone.utc)
+        if self._market_open(now):
+            return self.market_hours_ttl
+        return max(1, int(self.settings_provider().price_refresh_minutes)) * 60
+
+    def as_of(self) -> str | None:
+        stamps = [entry.get("retrieved_at") for entry in self.metadata().values() if entry.get("retrieved_at")]
+        return max(stamps) if stamps else None
+
+    def is_fresh(self, now: datetime | None = None) -> bool:
+        as_of = self.as_of()
+        if not as_of:
+            return False
+        try:
+            retrieved = datetime.fromisoformat(as_of)
+        except ValueError:
+            return False
+        if retrieved.tzinfo is None:
+            retrieved = retrieved.replace(tzinfo=timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        return (now - retrieved).total_seconds() < self.ttl_seconds(now)
+
+    async def refresh(self, force: bool = False, now: datetime | None = None) -> dict:
+        """Refresh stored prices when enabled and stale; never raises to callers."""
+        settings = self.settings_provider()
+        if not force and not settings.auto_prices_enabled:
+            return self.metadata()
+        snapshot = self.store.snapshot()
+        symbols = list(dict.fromkeys(position.symbol for position in snapshot.positions)) if snapshot else []
+        if not symbols:
+            return self.metadata()
+        now = now or datetime.now(timezone.utc)
+        if not force and self.is_fresh(now):
+            return self.metadata()
+        async with self._lock:
+            if not force and self.is_fresh(now):
+                return self.metadata()
+            try:
+                quotes = await self.provider.quotes(symbols)
+            except Exception:
+                return self.metadata()
+            if not quotes:
+                return self.metadata()
+            held = set(symbols)
+            metadata = {symbol: entry for symbol, entry in self.metadata().items() if symbol in held}
+            for symbol, quote in quotes.items():
+                metadata[symbol] = {"trading_date": quote.get("trading_date"),
+                                    "retrieved_at": quote.get("retrieved_at"),
+                                    "source": quote.get("source", "yfinance")}
+            current = self.store.snapshot()
+            if current is not None:
+                for position in current.positions:
+                    quote = quotes.get(position.symbol)
+                    if quote and quote.get("price") is not None:
+                        position.price = Decimal(str(quote["price"]))
+                        if quote.get("previous_close") is not None:
+                            position.previous_close = Decimal(str(quote["previous_close"]))
+                self.store.save_snapshot(current)
+            self.store.set(self.KEY, metadata)
+            self._cache = metadata
+            return metadata
 
 
 class ApplicationService:
@@ -90,6 +324,7 @@ class ApplicationService:
         self.directory = directory
         self.store = Store(directory)
         self.secrets = SecretStore(directory, server=server)
+        self.quotes = QuoteService(self.store, YFinanceMarketDataProvider(), lambda: self.settings)
         self.tasks = {}
         self.stopping = False
 
@@ -241,10 +476,34 @@ class ApplicationService:
         except ValueError:
             pass
 
+    async def refresh_quotes(self, force: bool = False):
+        """Best-effort quote refresh; never lets market-data failures reach callers."""
+        try:
+            return await self.quotes.refresh(force=force)
+        except Exception:
+            return self.quotes.metadata()
+
+    def quote_payload(self) -> dict:
+        """Shape automatic quotes for the saved portfolio (missing symbols omitted)."""
+        metadata = self.quotes.metadata()
+        snapshot = self.store.snapshot()
+        positions = {position.symbol: position for position in snapshot.positions} if snapshot else {}
+        prices = {}
+        for symbol, entry in metadata.items():
+            position = positions.get(symbol)
+            if position is None:
+                continue
+            prices[symbol] = {"price": str(position.price) if position.price is not None else None,
+                              "previous_close": str(position.previous_close) if position.previous_close is not None else None,
+                              "trading_date": entry.get("trading_date"), "retrieved_at": entry.get("retrieved_at"),
+                              "source": entry.get("source")}
+        return {"prices": prices, "as_of": self.quotes.as_of(), "refresh_seconds": self.quotes.ttl_seconds()}
+
     async def scheduler_loop(self):
         while not self.stopping:
             try:
                 await self.scheduler_tick()
+                await self.refresh_quotes()
                 self.store.prune(self.settings.retention_days)
             except Exception:
                 self.store.set("scheduler_error", "Scheduled run could not start; check holdings, email verification, and connections.")

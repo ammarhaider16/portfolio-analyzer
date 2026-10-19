@@ -78,6 +78,11 @@ class Store:
             row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         return dict(row) if row else None
 
+    def delete_run(self, run_id):
+        """Remove one finished report; active runs are never deleted here."""
+        with self.db() as db:
+            return db.execute("DELETE FROM runs WHERE id=? AND status NOT IN ('queued','running')", (run_id,)).rowcount == 1
+
     def history(self, limit=30):
         with self.db() as db:
             return [dict(row) for row in db.execute("SELECT id,created_at,status,error,delivery,schedule_key,summary FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))]

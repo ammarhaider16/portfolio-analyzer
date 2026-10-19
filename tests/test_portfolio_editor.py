@@ -122,6 +122,73 @@ assert.equal(amount('','Price',true),null);
 loadPortfolio(null);
 assert.equal(portfolioDirty,false);
 assert.equal(collectPortfolio().positions.length,0);
+loadPortfolio({as_of:'2026-10-18T12:00:00Z',positions:[{symbol:'ABC',quantity:'2',price:'42.50'}],cash:'10'});
+assert.equal(collectPortfolio().positions[0].price,'42.50');
+const firstRow=document.querySelector('#holdings-rows').children[0];
+assert.equal(firstRow.querySelectorAll().some(field=>field.dataset.field==='price'),false);
+assert.ok(firstRow.children[2].children[0].textContent.includes('42.50'));
+'''
+    result = subprocess.run([node, '-e', harness, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_settings_validation_returns_named_fields(tmp_path):
+    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
+        page = client.get('/')
+        token = re.search(r'name="csrf-token" content="([^"]+)"', page.text).group(1)
+        response = client.post('/api/settings', headers={'x-csrf-token': token}, json={'max_searches': 999})
+        assert response.status_code == 400, response.text
+        errors = response.json().get('errors') or []
+        assert errors and any(entry['field'].endswith('max_searches') for entry in errors)
+        assert all(entry['message'] for entry in errors)
+        # The submitted value is never echoed back to the browser.
+        assert '999' not in response.text
+
+
+def test_dashboard_javascript_compacts_long_amounts_and_routes_views():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is required to exercise browser JavaScript')
+    script = Path(__file__).parents[1] / 'src/portfolio_analyzer/static/app.js'
+    harness = r'''
+const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
+class Element {
+  constructor(){this.children=[];this.dataset={};this.handlers={};this.value='';this.content='csrf';this._text='';}
+  append(...items){for(const item of items){item.parent=this;this.children.push(item);}}
+  replaceChildren(){this.children=[];}
+  setAttribute(){}
+  addEventListener(name,callback){this.handlers[name]=callback;}
+  remove(){}
+  get firstElementChild(){return this.children[0];}
+  querySelectorAll(){return [];}
+  get textContent(){return this._text;}
+  set textContent(value){this._text=value;}
+}
+const elements=new Map();
+global.document={querySelector(selector){if(!elements.has(selector)) elements.set(selector,new Element());return elements.get(selector);},querySelectorAll(){return [];},createElement(){return new Element();}};
+vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8').split('async function refresh(')[0]);
+// Ordinary amounts stay exact; long amounts compact but keep the exact figure.
+const short=displayFigure(3745.67);
+assert.equal(short.text, short.exact);
+assert.equal(short.text, exactMoney(3745.67));
+const long=displayFigure(1234567.89);
+assert.notEqual(long.text, long.exact);
+assert.ok(long.exact.length>9);
+assert.ok(long.text.length<long.exact.length);
+assert.equal(long.exact, exactMoney(1234567.89));
+assert.ok(compactFigure(1234567.89).length < exactMoney(1234567.89).length);
+// Hash routes map to the addressable views.
+assert.equal(viewFromHash('#portfolio'),'desk');
+assert.equal(viewFromHash('#connections'),'connections');
+assert.equal(viewFromHash('#preferences'),'preferences');
+assert.equal(viewFromHash('#automation'),'automation');
+assert.equal(viewFromHash('#portfolio-editor'),null);
+assert.equal(VIEW_ROUTES.desk,'portfolio');
+assert.equal(VIEW_ROUTES.automation,'automation');
+// News legend reads clearly for every status the engine can emit.
+for(const status of ['verified','discovery_only','no_verified_update','search_failed','not_checked']) assert.ok(NEWS_STATUS[status], status);
+assert.equal(NEWS_STATUS.verified.dot,'verified');
+assert.ok(NEWS_STATUS.discovery_only.label.includes('headline only (not verified)'));
 '''
     result = subprocess.run([node, '-e', harness, str(script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

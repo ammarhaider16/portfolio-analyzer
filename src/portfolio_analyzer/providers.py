@@ -1,11 +1,12 @@
 """Optional providers. Network access occurs only when explicitly configured."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
+import re
 import socket
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from .models import Evidence, PortfolioSnapshot
 
 
@@ -45,7 +46,7 @@ async def retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool 
             response = connection.getresponse()
             if response.status != 200:
                 raise ValueError("Source unavailable or redirected")
-            if not any(t in response.getheader("Content-Type", "") for t in ("text/html", "text/plain", "xml")):
+            if not any(t in response.getheader("Content-Type", "") for t in ("text/html", "text/plain", "xml", "json")):
                 raise ValueError("Unsupported source content type")
             content = response.read(max_bytes + 1)
             if len(content) > max_bytes:
@@ -172,6 +173,50 @@ class YFinanceMarketDataProvider:
                         position.previous_close = Decimal(str(history["Close"].iloc[-2]))
         return result, metadata
 
+    async def quotes(self, symbols: list[str]) -> dict[str, dict]:
+        """Fetch daily-close quotes for many symbols in one batched yfinance request.
+
+        Returns per-symbol ``price``, ``previous_close``, ``trading_date``,
+        ``retrieved_at`` and ``source``. Symbols the provider does not return, or
+        rows without a usable close, are omitted rather than invented.
+        """
+        unique = list(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()))
+        if not unique:
+            return {}
+
+        def fetch():
+            import yfinance as yf
+            return yf.download(" ".join(unique), period="5d", interval="1d", auto_adjust=False,
+                               progress=False, threads=True, group_by="ticker", timeout=10)
+
+        try:
+            data = await asyncio.to_thread(fetch)
+        except Exception:
+            return {}
+        if data is None or getattr(data, "empty", True):
+            return {}
+        from decimal import Decimal
+        retrieved_at = datetime.now(timezone.utc).isoformat()
+        multi = getattr(data.columns, "nlevels", 1) > 1
+        quotes = {}
+        for symbol in unique:
+            try:
+                series = data[(symbol, "Close")] if multi else data["Close"]
+            except (KeyError, TypeError):
+                continue
+            series = series.dropna()
+            if series.empty:
+                continue
+            try:
+                price = Decimal(str(series.iloc[-1]))
+                trading_date = str(series.index[-1].date())
+                previous_close = Decimal(str(series.iloc[-2])) if len(series) > 1 else None
+            except (ValueError, ArithmeticError, IndexError):
+                continue
+            quotes[symbol] = {"price": price, "previous_close": previous_close, "trading_date": trading_date,
+                              "retrieved_at": retrieved_at, "source": "yfinance"}
+        return quotes
+
     async def history(self, snapshot: PortfolioSnapshot) -> dict[str, dict[str, float]]:
         def fetch(symbol):
             import yfinance as yf
@@ -269,6 +314,420 @@ class PrimaryFeedResearchProvider:
     async def retrieve(self, source: Evidence) -> Evidence:
         content = await self._fetch(source.url)
         return source.model_copy(update={"excerpt": content, "content_type": "retrieved_page"})
+
+
+def _dedupe_sources(sources: list[Evidence]) -> list[Evidence]:
+    seen: set[str] = set()
+    unique: list[Evidence] = []
+    for source in sources:
+        if source.url in seen:
+            continue
+        seen.add(source.url)
+        unique.append(source)
+    return unique
+
+
+def _local_name(tag) -> str:
+    return tag.rsplit("}", 1)[-1].lower() if isinstance(tag, str) else ""
+
+
+def _feed_datetime(value: str | None):
+    if not value:
+        return None
+    from email.utils import parsedate_to_datetime
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed is not None:
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _feed_items(raw: str):
+    from xml.etree import ElementTree
+    root = ElementTree.fromstring(raw)
+    return [element for element in root.iter() if _local_name(element.tag) in ("item", "entry")]
+
+
+def _entry_value(entry, *names) -> str:
+    accepted = {name.lower() for name in names}
+    for child in list(entry):
+        if _local_name(child.tag) in accepted:
+            text = (child.text or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _entry_link(entry) -> str:
+    for child in list(entry):
+        if _local_name(child.tag) != "link":
+            continue
+        href = (child.get("href") or "").strip()
+        if href:
+            return href
+        text = (child.text or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _entry_publisher(entry, fallback: str) -> str:
+    for child in list(entry):
+        if _local_name(child.tag) != "source":
+            continue
+        url = (child.get("url") or "").strip()
+        host = urlparse(url).hostname if url else None
+        if host:
+            return host
+    return fallback
+
+
+def _entry_tickers(entry) -> set[str]:
+    tickers: set[str] = set()
+    for child in entry.iter():
+        if _local_name(child.tag) != "tickers":
+            continue
+        for token in re.split(r"[,\s]+", (child.text or "").strip()):
+            if token:
+                tickers.add(token.upper())
+    return tickers
+
+
+def _recency_query(query: str, reporting_cutoff) -> str:
+    if reporting_cutoff is None:
+        return query
+    after = (reporting_cutoff - timedelta(days=90)).date().isoformat()
+    before = (reporting_cutoff + timedelta(days=1)).date().isoformat()
+    return f"{query} after:{after} before:{before}"
+
+
+def _decode_bing_link(link: str) -> str:
+    from urllib.parse import parse_qs
+    parsed = urlparse(link)
+    if parsed.hostname and parsed.hostname.endswith("bing.com"):
+        target = parse_qs(parsed.query).get("url", [""])[0]
+        return target.strip()
+    return link
+
+
+class SecFilingsResearchProvider:
+    """Per-company SEC filings from keyless official JSON endpoints.
+
+    Requires an identifying contact user agent for SEC fair access; without one the
+    provider abstains rather than guessing. Filings are trusted official_feed evidence
+    and need no page retrieval.
+    """
+
+    TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
+    SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+
+    def __init__(self, sec_user_agent: str | None = None, forms: tuple[str, ...] = ("8-K", "10-Q", "10-K"), ttl: int = 86400):
+        self.sec_user_agent = sec_user_agent
+        self.forms = tuple(form.upper() for form in forms)
+        self.ttl = ttl
+        self._tickers: dict[str, tuple[int, str]] = {}
+        self._tickers_at = 0.0
+        self._tickers_lock = asyncio.Lock()
+        self._last_sec_request = 0.0
+
+    def _enabled(self) -> bool:
+        return bool(self.sec_user_agent and self.sec_user_agent.strip())
+
+    async def _request_json(self, url: str):
+        import json
+        await asyncio.sleep(max(0.0, 0.2 - (time.monotonic() - self._last_sec_request)))
+        self._last_sec_request = time.monotonic()
+        raw = await retrieve_public_text(url, max_bytes=1_000_000, raw=True,
+                                         user_agent=self.sec_user_agent or "PortfolioResearch/1.0")
+        return json.loads(raw)
+
+    async def _ticker_map(self) -> dict[str, tuple[int, str]]:
+        async with self._tickers_lock:
+            if self._tickers and time.monotonic() - self._tickers_at < self.ttl:
+                return self._tickers
+            payload = await self._request_json(self.TICKER_MAP_URL)
+            rows = payload.values() if isinstance(payload, dict) else payload
+            mapping: dict[str, tuple[int, str]] = {}
+            for row in rows:
+                try:
+                    ticker = str(row["ticker"]).strip().upper()
+                    cik = int(row["cik_str"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                mapping[ticker] = (cik, str(row.get("title", "")).strip())
+            self._tickers = mapping
+            self._tickers_at = time.monotonic()
+            return mapping
+
+    @staticmethod
+    def _symbol_from_query(query: str) -> str:
+        match = re.search(r"\$?([A-Z]{1,5})(?![A-Za-z])", query or "")
+        return match.group(1) if match else ""
+
+    async def search_symbol(self, symbol: str, name: str | None = None, max_results: int = 4, reporting_cutoff=None) -> list[Evidence]:
+        if not self._enabled() or max_results <= 0:
+            return []
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            return []
+        try:
+            mapping = await self._ticker_map()
+        except Exception:
+            return []
+        entry = mapping.get(symbol) or mapping.get(symbol.replace("-", ".")) or mapping.get(symbol.replace(".", "-"))
+        if entry is None:
+            return []
+        cik, company = entry
+        try:
+            payload = await self._request_json(self.SUBMISSIONS_URL.format(cik=f"{cik:010d}"))
+        except Exception:
+            return []
+        recent = payload.get("filings", {}).get("recent") if isinstance(payload, dict) else None
+        if not isinstance(recent, dict):
+            return []
+        forms = recent.get("form") or []
+        accessions = recent.get("accessionNumber") or []
+        dates = recent.get("filingDate") or []
+        results: list[Evidence] = []
+        for index, form in enumerate(forms):
+            form = str(form).upper()
+            if form not in self.forms or index >= len(accessions) or index >= len(dates):
+                continue
+            published = _feed_datetime(str(dates[index]))
+            if reporting_cutoff is not None and (published is None or published > reporting_cutoff):
+                continue
+            accession = str(accessions[index]).replace("-", "")
+            url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/"
+            label = " ".join(part for part in (symbol, company) if part).strip()
+            results.append(Evidence(
+                id=hashlib.sha256(url.encode()).hexdigest()[:16], url=url,
+                title=f"{symbol} {form} filing"[:500], publisher="sec.gov", published_at=published,
+                excerpt=f"{label} filed a {form} on {dates[index]}."[:5000], content_type="official_feed"))
+            if len(results) >= max_results:
+                break
+        return results
+
+    async def search(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
+        symbol = self._symbol_from_query(query)
+        if not symbol:
+            return []
+        return await self.search_symbol(symbol, None, max_results=max_results, reporting_cutoff=reporting_cutoff)
+
+    async def search_events(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
+        return await self.search(query, max_results=max_results, reporting_cutoff=reporting_cutoff)
+
+
+class TickerNewsFeedProvider:
+    """Keyless, dated headline feeds for per-company news (Google News / Nasdaq).
+
+    Aggregator links are never page-retrieved; items are supplied as dated ``news_feed``
+    evidence only, so no ``retrieved_page`` is produced for them.
+    """
+
+    SOURCES = ("google_news", "nasdaq", "bing_news")
+    GOOGLE_NEWS_URL = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+    NASDAQ_URL = "https://nasdaq.com/feed/rssoutbound?symbol={symbol}"
+    BING_NEWS_URL = "https://www.bing.com/news/search?q={query}&format=RSS"
+
+    def __init__(self, sources=("google_news", "nasdaq"), timeout: float = 15, ttl: int = 300, fallback=None):
+        if isinstance(sources, str):
+            sources = (sources,)
+        self.sources = tuple(source for source in sources if source in self.SOURCES)
+        self.timeout = timeout
+        self.ttl = ttl
+        self.fallback = fallback
+        self._cache: dict[str, tuple[float, str]] = {}
+        self._lock = asyncio.Lock()
+
+    async def _fetch(self, url: str) -> str:
+        async with self._lock:
+            cached = self._cache.get(url)
+            if cached and time.monotonic() - cached[0] < self.ttl:
+                return cached[1]
+            raw = await asyncio.wait_for(retrieve_public_text(url, max_bytes=500_000, raw=True), timeout=self.timeout)
+            self._cache[url] = (time.monotonic(), raw)
+            return raw
+
+    @staticmethod
+    def _symbol_from_query(query: str) -> str:
+        match = re.search(r"\$?([A-Z]{1,5})(?![A-Za-z])", query or "")
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _symbol_query(symbol: str, name: str | None) -> str:
+        if name and name.strip():
+            return f'"{name.strip()}" OR {symbol} stock'
+        return f"{symbol} stock"
+
+    def _to_evidence(self, entry, symbol, name, reporting_cutoff, require_tickers: bool = False, bing: bool = False):
+        link = _entry_link(entry)
+        if bing:
+            link = _decode_bing_link(link)
+        if not link or not link.startswith("https://"):
+            return None
+        published = _feed_datetime(_entry_value(entry, "pubDate", "published", "updated", "date"))
+        if published is None:
+            return None
+        if reporting_cutoff is not None and published > reporting_cutoff:
+            return None
+        if require_tickers:
+            tickers = _entry_tickers(entry)
+            if not tickers or not symbol or symbol.upper() not in tickers:
+                return None
+        title = _entry_value(entry, "title") or "News update"
+        summary = _entry_value(entry, "description", "summary", "content")
+        host = urlparse(link).hostname or "news"
+        publisher = _entry_publisher(entry, host)
+        label = " ".join(part for part in (symbol, name) if part).strip()
+        excerpt = f"{label}: {summary}" if label else summary
+        return Evidence(id=hashlib.sha256(link.encode()).hexdigest()[:16], url=link, title=title[:500],
+                        publisher=publisher[:200], published_at=published, excerpt=excerpt.strip()[:5000],
+                        content_type="news_feed")
+
+    async def _source_entries(self, source: str, query: str, symbol: str, name: str | None, reporting_cutoff) -> list[Evidence]:
+        if source == "google_news":
+            url = self.GOOGLE_NEWS_URL.format(query=quote(_recency_query(query, reporting_cutoff), safe=""))
+            entries = _feed_items(await self._fetch(url))
+            return [item for entry in entries if (item := self._to_evidence(entry, symbol, name, reporting_cutoff)) is not None]
+        if source == "nasdaq":
+            if not symbol:
+                return []
+            url = self.NASDAQ_URL.format(symbol=quote(symbol, safe=""))
+            entries = _feed_items(await self._fetch(url))
+            return [item for entry in entries
+                    if (item := self._to_evidence(entry, symbol, name, reporting_cutoff, require_tickers=True)) is not None]
+        if source == "bing_news":
+            url = self.BING_NEWS_URL.format(query=quote(_recency_query(query, reporting_cutoff), safe=""))
+            entries = _feed_items(await self._fetch(url))
+            return [item for entry in entries
+                    if (item := self._to_evidence(entry, symbol, name, reporting_cutoff, bing=True)) is not None]
+        return []
+
+    async def search_symbol(self, symbol: str, name: str | None = None, max_results: int = 4, reporting_cutoff=None) -> list[Evidence]:
+        symbol = (symbol or "").strip().upper()
+        if not symbol or max_results <= 0:
+            return []
+        query = self._symbol_query(symbol, name)
+        results: list[Evidence] = []
+        seen: set[str] = set()
+        for source in self.sources:
+            try:
+                entries = await self._source_entries(source, query, symbol, name, reporting_cutoff)
+            except Exception:
+                continue
+            for entry in entries:
+                if entry.url in seen:
+                    continue
+                seen.add(entry.url)
+                results.append(entry)
+                if len(results) >= max_results:
+                    return results
+        return await self._supplement(query, seen, results, max_results, reporting_cutoff)
+
+    async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
+        return await self._generic(query, max_results, None)
+
+    async def search_events(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
+        return await self._generic(query, max_results, reporting_cutoff)
+
+    async def _generic(self, query: str, max_results: int, reporting_cutoff) -> list[Evidence]:
+        if max_results <= 0:
+            return []
+        symbol = self._symbol_from_query(query)
+        results: list[Evidence] = []
+        seen: set[str] = set()
+        for source in self.sources:
+            try:
+                entries = await self._source_entries(source, query, symbol, None, reporting_cutoff)
+            except Exception:
+                continue
+            for entry in entries:
+                if entry.url in seen:
+                    continue
+                seen.add(entry.url)
+                results.append(entry)
+                if len(results) >= max_results:
+                    return results
+        return await self._supplement(query, seen, results, max_results, reporting_cutoff)
+
+    async def _supplement(self, query, seen, results, max_results, reporting_cutoff):
+        if self.fallback is None or len(results) >= max_results:
+            return results[:max_results]
+        try:
+            handler = getattr(self.fallback, "search_events", None)
+            if handler is not None:
+                extra = await handler(query, max_results=max_results - len(results), reporting_cutoff=reporting_cutoff)
+            else:
+                extra = await self.fallback.search(query, max_results=max_results - len(results))
+        except Exception:
+            return results[:max_results]
+        for entry in extra:
+            if entry.url not in seen:
+                seen.add(entry.url)
+                results.append(entry)
+            if len(results) >= max_results:
+                break
+        return results[:max_results]
+
+
+class CompositeResearchProvider:
+    """Ordered research providers; official feeds are consulted first, RSS news supplements them."""
+
+    def __init__(self, providers):
+        self.providers = [provider for provider in providers if provider is not None]
+
+    async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
+        results: list[Evidence] = []
+        for provider in self.providers:
+            search = getattr(provider, "search", None)
+            if search is None:
+                continue
+            try:
+                results.extend(await search(query, max_results=max_results))
+            except Exception:
+                continue
+        return _dedupe_sources(results)[:max_results]
+
+    async def search_events(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
+        results: list[Evidence] = []
+        for provider in self.providers:
+            handler = getattr(provider, "search_events", None)
+            try:
+                if handler is not None:
+                    results.extend(await handler(query, max_results=max_results, reporting_cutoff=reporting_cutoff))
+                elif hasattr(provider, "search"):
+                    results.extend(await provider.search(query, max_results=max_results))
+            except Exception:
+                continue
+        return _dedupe_sources(results)[:max_results]
+
+    async def search_symbol(self, symbol: str, name: str | None = None, max_results: int = 4, reporting_cutoff=None) -> list[Evidence]:
+        results: list[Evidence] = []
+        for provider in self.providers:
+            handler = getattr(provider, "search_symbol", None)
+            if handler is None:
+                continue
+            try:
+                results.extend(await handler(symbol, name, max_results=max_results, reporting_cutoff=reporting_cutoff))
+            except Exception:
+                continue
+        return _dedupe_sources(results)[:max_results]
+
+    async def retrieve(self, source: Evidence) -> Evidence:
+        # Official and headline evidence is trusted as supplied; never fetch an aggregator page.
+        if source.content_type in {"official_feed", "news_feed"}:
+            return source
+        for provider in self.providers:
+            handler = getattr(provider, "retrieve", None)
+            if handler is not None:
+                return await handler(source)
+        return source
 
 
 class AlphaVantageResearchProvider:

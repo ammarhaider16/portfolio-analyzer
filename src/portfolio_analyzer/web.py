@@ -27,8 +27,60 @@ from .delivery import render_report
 from .imports import parse_holdings_csv, validate_portfolio_snapshot
 from .models import AnalysisRequest, AnalysisResult, PortfolioSnapshot
 from .scheduling import next_session_run
-from .service import ApplicationService, build_dependencies, create_model, read_secret
+from .secrets import SecretStorageError
+from .service import (MODEL_PROVIDER_ALIASES, MODEL_PROVIDER_SLOTS, SECRET_ALIASES, ApplicationService,
+                      build_dependencies, create_model, read_secret, resolve_model_key, resolve_secret, secret_status)
 from .screenshot_import import DraftPosition
+
+MODEL_SECRET_SLOTS = set(MODEL_PROVIDER_SLOTS.values()) | {"model_api_key"}
+DEPLOYMENT_SECRETS = {"tavily_api_key", "smtp_password", "alpha_vantage_api_key"}
+
+
+def safe_error_reason(exc, secret=None):
+    """A short, secret-free category describing why a provider call failed."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 401:
+        return "the endpoint rejected the API key (HTTP 401). Check that the key belongs to the selected provider"
+    if status == 403:
+        return "the endpoint refused access (HTTP 403). Check the key's permissions and model access"
+    if status == 404:
+        return "the endpoint or model was not found (HTTP 404). Check the base URL and model identifier"
+    if status == 429:
+        return "the provider rate limit was reached (HTTP 429)"
+    if isinstance(status, int) and status >= 500:
+        return f"the provider returned a server error (HTTP {status})"
+    message = str(exc)
+    if secret:
+        message = message.replace(secret, "***")
+    message = message.splitlines()[0][:180].strip() if message else exc.__class__.__name__
+    return message or exc.__class__.__name__
+
+
+def secret_kind(name):
+    if name == "model_api_key" or name in MODEL_SECRET_SLOTS:
+        return "model"
+    if name in {"tavily_api_key", "alpha_vantage_api_key"}:
+        return "search"
+    if name == "smtp_password":
+        return "email"
+    return None
+
+
+def secret_aliases(name):
+    for provider, slot in MODEL_PROVIDER_SLOTS.items():
+        if slot == name:
+            return MODEL_PROVIDER_ALIASES.get(provider, ())
+    return SECRET_ALIASES.get(name, ())
+
+
+class FieldValidationError(ValueError):
+    """A validation failure that names the offending fields without echoing values."""
+
+    def __init__(self, message: str, errors: list[dict[str, str]]):
+        super().__init__(message)
+        self.errors = errors
 
 
 class RunSubmission(BaseModel):
@@ -195,7 +247,11 @@ def create_app(directory: Path | None = None, server: bool | None = None):
 
     @app.exception_handler(ValueError)
     async def value_error(request, exc):
-        return JSONResponse({"detail": str(exc)[:300]}, status_code=400)
+        payload = {"detail": str(exc)[:300]}
+        errors = getattr(exc, "errors", None)
+        if errors:
+            payload["errors"] = errors
+        return JSONResponse(payload, status_code=400)
 
     @app.get("/health")
     async def health():
@@ -244,21 +300,29 @@ def create_app(directory: Path | None = None, server: bool | None = None):
     async def status():
         settings = service.settings
         snapshot = service.store.snapshot()
+        quotes = service.quote_payload()
         next_run = None
         if settings.schedule.enabled:
             next_run = (await asyncio.to_thread(next_session_run, datetime.now(timezone.utc), settings.schedule.delay_minutes, settings.schedule.timezone)).isoformat()
+        secrets = await asyncio.to_thread(secret_status, settings, service.secrets, server)
+        storage = await asyncio.to_thread(service.secrets.storage_status)
+        legacy = ("model_api_key", "tavily_api_key", "smtp_password", "alpha_vantage_api_key")
         return {"snapshot": snapshot.model_dump(mode="json") if snapshot else None,
                 "history": service.store.history(), "settings": settings.model_dump(mode="json"),
+                "prices": quotes["prices"], "prices_as_of": quotes["as_of"],
                 "externally_managed": sorted(externally_managed()), "next_run": next_run,
                 "verified_recipient": service.store.get("verified_recipient"), "server": server,
                 "scheduler_error": service.store.get("scheduler_error"),
                 "connection_tests": service.store.get("connection_tests", {}),
-                "secrets_present": {name: bool(read_secret(service.secrets, name)) for name in ("model_api_key", "tavily_api_key", "smtp_password", "alpha_vantage_api_key")},
-                "secrets_editable": {name: not server and not any(os.environ.get(key) or os.environ.get(key + "_FILE")
-                    for key in (("PORTFOLIO_SECRET_" + name.upper(),) + aliases))
-                    for name, aliases in {"model_api_key": ("LITELLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
-                                          "tavily_api_key": ("TAVILY_API_KEY",), "smtp_password": (),
-                                          "alpha_vantage_api_key": ("ALPHA_VANTAGE_API_KEY",)}.items()}}
+                "secrets": secrets,
+                "secret_storage": storage,
+                "secrets_present": {name: secrets[name]["present"] for name in legacy},
+                "secrets_editable": {name: secrets[name]["editable"] for name in legacy}}
+
+    @app.get("/api/quotes")
+    async def quotes():
+        await service.refresh_quotes()
+        return service.quote_payload()
 
     @app.post("/api/settings")
     async def settings_update(request: Request):
@@ -269,7 +333,10 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         try:
             updated = Settings.model_validate(current.model_dump() | body)
         except ValidationError as exc:
-            raise ValueError("Check configuration: " + "; ".join(".".join(map(str, e["loc"])) + " " + e["msg"] for e in exc.errors())) from None
+            errors = [{"field": ".".join(map(str, e["loc"])), "message": e["msg"]} for e in exc.errors()]
+            raise FieldValidationError(
+                "Check configuration: " + "; ".join(".".join(map(str, e["loc"])) + " " + e["msg"] for e in exc.errors()),
+                errors) from None
         old_recipient = current.smtp.recipient if current.smtp else None
         new_recipient = updated.smtp.recipient if updated.smtp else None
         if old_recipient != new_recipient:
@@ -282,44 +349,123 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         tests = service.store.get("connection_tests", {})
         if current.model != updated.model or current.model_enabled != updated.model_enabled:
             tests.pop("model", None)
-        if any(getattr(current, field) != getattr(updated, field) for field in ("search_provider", "primary_feeds_enabled", "sec_contact", "alpha_vantage_enabled")):
+        if any(getattr(current, field) != getattr(updated, field) for field in ("search_provider", "primary_feeds_enabled", "sec_contact", "alpha_vantage_enabled", "sec_company_filings_enabled", "ticker_news_enabled", "news_feed_sources")):
             tests.pop("search", None)
         service.store.set("connection_tests", tests)
         save_settings(directory, updated)
         return {"ok": True}
 
-    @app.post("/api/secrets/{name}")
-    async def save_secret(name: str, request: Request):
-        if name not in {"model_api_key", "tavily_api_key", "smtp_password", "alpha_vantage_api_key"}:
+    def clear_connection_test(kind):
+        if not kind:
+            return
+        tests = service.store.get("connection_tests", {})
+        tests.pop(kind, None)
+        service.store.set("connection_tests", tests)
+
+    def target_secret(name):
+        # A bare model_api_key means the slot that actually supplies the key for the selected
+        # provider: its dedicated slot, or the legacy shared slot being migrated. This keeps
+        # update/delete acting on the effective credential instead of an empty sibling slot.
+        if name == "model_api_key":
+            _, source, used = resolve_model_key(service.settings, service.secrets)
+            if source == "keyring" and used:
+                return used
+            return MODEL_PROVIDER_SLOTS[service.settings.model.provider]
+        return name
+
+    def resolve_value(requested):
+        target = target_secret(requested)
+        if target not in MODEL_SECRET_SLOTS and target not in DEPLOYMENT_SECRETS:
             raise HTTPException(404)
-        value = (await json_object(request)).get("value", "")
-        if not isinstance(value, str) or not value or len(value) > 4096:
-            raise ValueError("Enter a valid credential")
-        from .secrets import SecretStorageError
+        return target
+
+    async def remove_secret(requested):
+        target = resolve_value(requested)
+        _, source = await asyncio.to_thread(resolve_secret, service.secrets, target, secret_aliases(target))
+        if source in ("env", "file"):
+            raise ValueError("This credential is managed by the deployment environment and cannot be removed here")
+        if source == "alias":
+            raise ValueError("This key comes from an environment alias; save a replacement from the dashboard to override it")
         try:
-            await asyncio.to_thread(service.secrets.set, name, value)
+            await asyncio.to_thread(service.secrets.delete, target)
         except SecretStorageError as exc:
             raise ValueError(str(exc)) from None
-        tests = service.store.get("connection_tests", {})
-        tests.pop("model" if name == "model_api_key" else "search" if name in {"tavily_api_key", "alpha_vantage_api_key"} else "email", None)
-        service.store.set("connection_tests", tests)
-        return {"ok": True}
+        clear_connection_test(secret_kind(target))
+        return {"ok": True, "name": target}
+
+    @app.post("/api/secrets/{name}")
+    async def save_secret(name: str, request: Request):
+        target = resolve_value(name)
+        body = await json_object(request)
+        raw = body.get("value")
+        if not isinstance(raw, str):
+            raise ValueError("Enter a valid credential")
+        value = raw.strip()
+        if not value or len(value) > 4096:
+            raise ValueError("Enter a valid credential")
+        _, source = await asyncio.to_thread(resolve_secret, service.secrets, target, secret_aliases(target))
+        if source in ("env", "file"):
+            raise ValueError("This credential is managed by the deployment environment and cannot be changed here")
+        try:
+            await asyncio.to_thread(service.secrets.set, target, value)
+        except SecretStorageError as exc:
+            raise ValueError(str(exc)) from None
+        clear_connection_test(secret_kind(target))
+        return {"ok": True, "name": target}
+
+    @app.delete("/api/secrets/{name}")
+    async def delete_secret(name: str, request: Request):
+        return await remove_secret(name)
+
+    @app.delete("/api/secrets")
+    async def delete_secret_query(request: Request, name: str):
+        # Optional ?name=model_api_key_<provider> convention for API clients.
+        return await remove_secret(name)
 
     @app.post("/api/test/{kind}")
-    async def test_connection(kind: str):
+    async def test_connection(kind: str, request: Request):
         if kind not in {"model", "search"}:
             raise HTTPException(404)
+        # Optional in-memory value: tested but never persisted or logged.
+        value = None
+        raw = await request.body()
+        if raw:
+            try:
+                body = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                raise ValueError("Expected a JSON object") from None
+            if not isinstance(body, dict):
+                raise ValueError("Expected a JSON object")
+            candidate = body.get("value")
+            if candidate is not None:
+                if not isinstance(candidate, str):
+                    raise ValueError("Enter a valid credential")
+                candidate = candidate.strip()
+                if not candidate or len(candidate) > 4096:
+                    raise ValueError("Enter a valid credential")
+                value = candidate
         try:
             async with asyncio.timeout(50):
                 if kind == "model":
                     from .agent import generate_narrative
                     from .demo import demo_snapshot
-                    model = create_model(service.settings, service.secrets)
+                    model = create_model(service.settings, service.secrets, api_key=value) if value is not None else create_model(service.settings, service.secrets)
                     from .metrics import calculate_metrics
                     snapshot = demo_snapshot()
-                    await generate_narrative(model, AnalysisRequest(snapshot=snapshot), calculate_metrics(snapshot), [])
+                    # Stage 1 distinguishes endpoint/auth/model problems from structured-output problems.
+                    if hasattr(model, "ainvoke"):
+                        try:
+                            await model.ainvoke("Reply with the single word ready.")
+                        except Exception as exc:
+                            raise ValueError("Model endpoint check failed: " + safe_error_reason(exc, value)) from None
+                    # Stage 2 exercises the structured-output request the briefing actually makes.
+                    try:
+                        await generate_narrative(model, AnalysisRequest(snapshot=snapshot), calculate_metrics(snapshot), [])
+                    except Exception as exc:
+                        raise ValueError("The endpoint answered, but it did not return the required structured response: " + safe_error_reason(exc, value)) from None
                 elif kind == "search":
-                    dep = build_dependencies(service.settings.model_copy(update={"model_enabled": False, "primary_feeds_enabled": False}), service.secrets)
+                    settings = service.settings.model_copy(update={"model_enabled": False, "primary_feeds_enabled": False})
+                    dep = build_dependencies(settings, service.secrets, tavily_key=value) if value is not None else build_dependencies(settings, service.secrets)
                     if not dep.research:
                         raise ValueError("Choose a search provider and add its key if required")
                     results = await dep.research.search("Federal Reserve latest policy announcement", max_results=1)
@@ -327,11 +473,16 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                         raise ValueError("Search returned no results")
         except HTTPException:
             raise
-        except Exception:
+        except ValueError:
             tests = service.store.get("connection_tests", {})
             tests[kind] = {"status": "failed", "tested_at": datetime.now(timezone.utc).isoformat()}
             service.store.set("connection_tests", tests)
-            raise ValueError("Connection test failed. Check provider, credentials, model capabilities, quota, and network access.") from None
+            raise
+        except Exception as exc:
+            tests = service.store.get("connection_tests", {})
+            tests[kind] = {"status": "failed", "tested_at": datetime.now(timezone.utc).isoformat()}
+            service.store.set("connection_tests", tests)
+            raise ValueError("Connection test failed: " + safe_error_reason(exc, value)) from None
         tests = service.store.get("connection_tests", {})
         tests[kind] = {"status": "passed", "tested_at": datetime.now(timezone.utc).isoformat()}
         service.store.set("connection_tests", tests)
@@ -413,12 +564,23 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             raise ValueError("This run is no longer active")
         return {"ok": True}
 
+    @app.delete("/api/runs/{run_id}")
+    async def delete_run(run_id: str):
+        row = service.store.run(run_id)
+        if not row:
+            raise HTTPException(404, "Report not found")
+        if row["status"] in {"queued", "running"}:
+            raise ValueError("Cancel an active run before deleting it")
+        if not service.store.delete_run(run_id):
+            raise ValueError("This report could not be deleted")
+        return {"ok": True}
+
     @app.get("/reports/{run_id}")
-    async def report(run_id: str, plain: bool = False):
+    async def report(run_id: str, plain: bool = False, embed: bool = False):
         row = service.store.run(run_id)
         if not row or not row["result"]:
             raise HTTPException(404, "Completed report not found")
-        html, text = render_report(AnalysisResult.model_validate_json(row["result"]))
+        html, text = render_report(AnalysisResult.model_validate_json(row["result"]), embed=embed)
         return PlainTextResponse(text) if plain else HTMLResponse(html)
 
     @app.post("/api/runs/{run_id}/send")

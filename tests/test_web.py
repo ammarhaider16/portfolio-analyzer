@@ -169,6 +169,11 @@ def test_secrets_validation_and_presence_never_echo_values(tmp_path):
         assert secret not in response.text
         status = client.get('/api/status')
         assert status.json()['secrets_present']['model_api_key'] is True
+        assert status.json()['secrets_editable']['model_api_key'] is True
+        info = status.json()['secrets']['model_api_key']
+        assert info['present'] is True and info['source'] == 'keyring' and info['provider'] == 'colgate'
+        assert status.json()['secrets']['model_api_key_colgate']['present'] is True
+        assert status.json()['secret_storage']['available'] in (True, False)
         assert secret not in status.text
         assert post(client, token, '/api/secrets/not_allowed', {'value': secret}).status_code == 404
         response = post(client, token, '/api/secrets/model_api_key', {'value': {'private': secret}})
@@ -265,3 +270,54 @@ def test_brokerage_endpoints_are_removed(tmp_path, method, path):
         assert response.status_code == 404
         assert 'broker' not in client.get('/api/status').json()
         assert 'id="broker-form"' not in client.get('/').text
+
+
+def test_delete_finished_report_owner_only(tmp_path):
+    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
+        token = csrf(client)
+        run_id = post(client, token, '/api/runs', {'source': 'demo'}).json()['run_id']
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            row = client.get('/api/runs/' + run_id).json()
+            if row['result'] is not None or row['status'] == 'failed':
+                break
+        assert client.delete('/api/runs/' + run_id, headers={'x-csrf-token': token}).status_code == 200
+        assert client.get('/api/runs/' + run_id).status_code == 404
+        # An unknown report and an unauthenticated delete are refused.
+        assert client.delete('/api/runs/missing', headers={'x-csrf-token': token}).status_code == 404
+        assert client.delete('/api/runs/' + run_id).status_code == 403
+
+
+def test_model_key_delete_targets_the_effective_legacy_slot(tmp_path, isolated_credentials):
+    # A key migrated to the legacy shared slot must be removable from the dashboard, not
+    # redirected to an empty per-provider slot.
+    values = isolated_credentials
+    values['model_api_key'] = 'legacy-key-123'
+    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
+        token = csrf(client)
+        assert client.get('/api/status').json()['secrets']['model_api_key']['present'] is True
+        response = client.delete('/api/secrets/model_api_key', headers={'x-csrf-token': token})
+        assert response.status_code == 200, response.text
+        assert 'model_api_key' not in values
+        assert client.get('/api/status').json()['secrets']['model_api_key']['present'] is False
+
+
+def test_delete_run_refuses_active_and_removes_finished(tmp_path):
+    from portfolio_analyzer.storage import Store
+    store = Store(tmp_path)
+    assert store.create_run('active-run')
+    assert store.delete_run('active-run') is False
+    store.update_run('active-run', status='failed')
+    assert store.delete_run('active-run') is True
+    assert store.run('active-run') is None
+
+
+def test_safe_error_reason_maps_status_and_redacts():
+    from portfolio_analyzer.web import safe_error_reason
+
+    class Unauthorized(Exception):
+        status_code = 401
+
+    assert '401' in safe_error_reason(Unauthorized('nope'))
+    redacted = safe_error_reason(Exception('bad key secret-abc'), 'secret-abc')
+    assert 'secret-abc' not in redacted

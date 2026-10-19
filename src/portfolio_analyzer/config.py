@@ -36,8 +36,17 @@ class Settings(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     model_enabled: bool = False
     search_provider: Literal["tavily", "keyless", "disabled"] = "keyless"
+    # market_data_enabled controls research-time enrichment (daily closes and history
+    # during an analysis run); auto_prices_enabled instead polls quotes on a schedule
+    # and keeps the saved portfolio's prices current. Manual/CSV prices remain an
+    # offline fallback when both are off.
     market_data_enabled: bool = False
+    auto_prices_enabled: bool = True
+    price_refresh_minutes: int = Field(default=15, ge=1, le=1440)
     primary_feeds_enabled: bool = True
+    sec_company_filings_enabled: bool = True
+    ticker_news_enabled: bool = True
+    news_feed_sources: list[str] = Field(default_factory=lambda: ["google_news", "nasdaq"])
     alpha_vantage_enabled: bool = False
     sec_contact: str = ""
     max_searches: int = Field(default=30, ge=0, le=30)
@@ -60,6 +69,19 @@ class Settings(BaseModel):
             from .models import InvestmentProfile
             return InvestmentProfile.model_validate(value).model_dump()
         return value
+
+    @field_validator("news_feed_sources")
+    @classmethod
+    def validate_news_feed_sources(cls, value):
+        allowed = ("google_news", "nasdaq", "bing_news")
+        normalized = []
+        for item in value:
+            name = str(item).strip().lower()
+            if name not in allowed:
+                raise ValueError(f"Unknown news feed source: {item}")
+            if name not in normalized:
+                normalized.append(name)
+        return normalized
 
 
 def data_directory() -> Path:

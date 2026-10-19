@@ -40,6 +40,32 @@ def test_professional_report_has_accessible_metrics_and_risk_sections():
     assert "Status: " not in plain
 
 
+def test_embed_drops_page_title_but_keeps_plain_text_and_sections():
+    report = result().model_copy(update={"coverage": {
+        "summary": "2 of 3 holdings valued; sourced insights available", "issues": []}})
+    default_html, default_plain = render_report(report)
+    embed_html, embed_plain = render_report(report, embed=True)
+    assert "<h1>Betafolio briefing</h1>" in default_html
+    assert "<h1>Betafolio briefing</h1>" not in embed_html
+    # Email and plain-text delivery keep the page title regardless of embedding.
+    assert default_plain == embed_plain
+    assert default_plain.startswith("Betafolio briefing")
+    assert "Bottom line" in embed_html
+    assert "2 of 3 holdings valued" in embed_html
+    assert "What to do next" in embed_html
+    assert "No action is needed right now" in embed_html
+
+
+def test_report_lists_actionable_next_steps_for_coverage_issues():
+    report = result().model_copy(update={"coverage": {
+        "summary": "1 of 2 holdings valued", "issues": [
+            {"code": "missing_prices", "message": "MSFT excluded from value and allocation; add prices.",
+             "action": "portfolio"}]}})
+    html, plain = render_report(report)
+    assert "What to do next" in html and "What to do next" in plain
+    assert "Review holdings and cash" in plain
+
+
 def test_percentage_view_omits_amounts_and_narrative():
     html, plain = render_report(result(), percent_only=True)
     assert "123456" not in html + plain

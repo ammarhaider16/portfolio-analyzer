@@ -8,14 +8,32 @@ from .metrics import calculate_metrics
 from .models import AnalysisRequest, AnalysisResult, Finding, InvestmentProfile, Position, PortfolioSnapshot
 
 
+_LEGAL_SUFFIX = re.compile(r"\b(?:incorporated|inc|corp(?:oration)?|company|co|ltd|limited|plc|llc|lp|holdings?|group|trust|n\.?a|s\.?a|ag|n\.?v|se)\b\.?", re.I)
+# Common words that are also ticker symbols; a bare token is never sufficient evidence.
+_AMBIGUOUS_SYMBOLS = {"LENS", "CASH", "USD", "ON", "IT", "ALL", "ARE", "CAN", "FOR", "NOW", "NEW", "OUT", "KEY", "SEE", "TWO"}
+
+
+def _short_instrument_name(name: str | None) -> str:
+    """Company name without legal suffixes, so headlines like "Apple Stock falls" still match."""
+    if not name:
+        return ""
+    cleaned = _LEGAL_SUFFIX.sub(" ", name)
+    cleaned = re.sub(r"[,\.]", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _entity_matches(source, position: Position) -> bool:
     """Reject ticker collisions before excerpts reach the synthesis model."""
-    haystack = f"{source.title} {source.excerpt}"[:12000]
+    title = source.title or ""
+    haystack = f"{title} {source.excerpt or ''}"[:12000]
     name = position.instrument_name
     if name and len(name) >= 5 and name.casefold() in haystack.casefold():
         return True
+    short = _short_instrument_name(name)
+    if short and len(short) >= 4 and re.search(rf"(?<![\w]){re.escape(short)}(?![\w])", title, re.I):
+        return True
     # Short/common-word tickers need the full resolved name; a bare token is unsafe.
-    if not name or len(position.symbol) < 4 or position.symbol in {"LENS", "CASH", "USD"}:
+    if not name or len(position.symbol) < 4 or position.symbol in _AMBIGUOUS_SYMBOLS:
         return False
     return bool(re.search(rf"(?<![\w]){re.escape(position.symbol)}(?![\w])", haystack, re.I))
 
@@ -90,7 +108,10 @@ async def _resolve_identities(snapshot: PortfolioSnapshot, market_data, budget_s
     return snapshot, identity, warnings
 
 
-async def _search_events(provider, query: str, max_results: int, cutoff):
+async def _search_events(provider, query: str, max_results: int, cutoff, symbol: str | None = None, name: str | None = None):
+    # Feed providers can address a symbol directly; the symbolic query stays the fallback.
+    if symbol and hasattr(provider, "search_symbol"):
+        return await provider.search_symbol(symbol, name, max_results=max_results, reporting_cutoff=cutoff)
     if hasattr(provider, "search_events"):
         return await provider.search_events(query, max_results=max_results, reporting_cutoff=cutoff)
     return await provider.search(query, max_results=max_results)
@@ -105,7 +126,8 @@ def _coverage(result: AnalysisResult, request: AnalysisRequest, dependencies) ->
                   if identity.get("status") == "unresolved"]
     total = int(metrics.get("total_positions", 0))
     valued = int(metrics.get("priced_positions", 0))
-    verified = [source for source in result.sources if source.content_type in {"retrieved_page", "official_feed"}]
+    verified = [source for source in result.sources if source.content_type in {"retrieved_page", "official_feed", "news_feed"}]
+    headline_only_evidence = bool(verified) and not any(source.content_type in {"retrieved_page", "official_feed"} for source in verified)
     position_news = metrics.get("position_news", [])
     cited = [finding for finding in result.findings if finding.evidence_ids]
     issues = []
@@ -118,6 +140,11 @@ def _coverage(result: AnalysisResult, request: AnalysisRequest, dependencies) ->
     not_checked = [item["symbol"] for item in position_news if item["status"] == "not_checked"]
     if not_checked and dependencies.research is not None:
         issues.append({"code": "news_not_checked", "message": f"News was not checked for {', '.join(not_checked[:8])}{' and others' if len(not_checked) > 8 else ''}; increase the search limit or time budget.", "action": "research"})
+    failed_searches = [item["symbol"] for item in position_news if item["status"] == "search_failed"]
+    if failed_searches and dependencies.research is not None:
+        issues.append({"code": "news_search_failed", "message": f"News search failed for {', '.join(failed_searches[:8])}{' and others' if len(failed_searches) > 8 else ''}. Check the search connection; these holdings were not checked.", "action": "research"})
+    if headline_only_evidence:
+        issues.append({"code": "headline_only_sources", "message": "Some current-event evidence is a dated headline link rather than full article text; treat those items as reported headlines, not verified article detail.", "action": "research"})
     if total == 0:
         event_state = "not_applicable"
         narrative_state = "not_applicable"
@@ -155,6 +182,7 @@ def _coverage(result: AnalysisResult, request: AnalysisRequest, dependencies) ->
             "missing_price_symbols": missing, "unsupported_symbols": unsupported,
             "unresolved_symbols": unresolved, "event_state": event_state,
             "narrative_state": narrative_state, "verified_source_count": len(verified),
+            "headline_only_evidence": headline_only_evidence,
             "position_news": position_news, "issues": issues}
 
 
@@ -285,7 +313,7 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                 result.warnings.append("Adjustment suggestions require a complete investment profile (objectives, horizon, risk_tolerance, liquidity_needs, allocation_targets, restrictions) and were withheld.")
             positions = {position.symbol: position for position in snapshot.positions}
             broad_source_ids = set()
-            news_by_symbol = {position.symbol: {"symbol": position.symbol, "status": "not_checked", "source_ids": []}
+            news_by_symbol = {position.symbol: {"symbol": position.symbol, "status": "not_checked", "source_ids": [], "evidence_grade": None}
                               for position in snapshot.positions}
             result.metrics["report_length"] = request.report_length
             result.metrics["position_news"] = list(news_by_symbol.values())
@@ -308,19 +336,22 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                     focus = "latest earnings filings material news fund holdings changes"
                     query = f'"{name}" {symbol} {focus}' if name else f'"{symbol}" ticker {focus}'
                     try:
-                        candidates = await _search_events(dependencies.research, query, 4, request.reporting_cutoff)
+                        candidates = await _search_events(dependencies.research, query, 4, request.reporting_cutoff, symbol=symbol, name=name)
                     except Exception:
                         return symbol, [], False, True
                     matched = []
                     failed_retrieval = False
+                    # Compare against the current time so items published during this run are not dropped.
+                    reference = request.reporting_cutoff or datetime.now(timezone.utc)
                     for source in sorted(candidates[:4], key=lambda item: item.published_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True):
-                        if source.published_at is not None and source.published_at > (request.reporting_cutoff or result.created_at):
+                        if source.published_at is not None and source.published_at > reference:
                             continue
                         if request.reporting_cutoff and source.published_at is None:
                             continue
-                        if not _recent_event(source, request.reporting_cutoff or result.created_at) or not _entity_matches(source, position):
+                        if not _recent_event(source, reference) or not _entity_matches(source, position):
                             continue
-                        if hasattr(dependencies.research, "retrieve"):
+                        # Headline feeds carry only a dated headline and link; never treat them as article text.
+                        if hasattr(dependencies.research, "retrieve") and source.content_type != "news_feed":
                             try:
                                 source = await dependencies.research.retrieve(source)
                             except Exception:
@@ -353,18 +384,22 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                             seen.add(source.url)
                             news_by_symbol[symbol]["source_ids"].append(source.id)
                         ids = news_by_symbol[symbol]["source_ids"]
-                        news_by_symbol[symbol]["status"] = ("verified" if any(
-                            source.id in ids and source.content_type in {"retrieved_page", "official_feed"}
-                            for source in result.sources) else "discovery_only" if ids else "no_verified_update")
+                        attached = [source for source in result.sources if source.id in ids]
+                        full_text = any(source.content_type in {"retrieved_page", "official_feed"} for source in attached)
+                        headline = any(source.content_type == "news_feed" for source in attached)
+                        news_by_symbol[symbol]["status"] = ("verified" if (full_text or headline)
+                                                            else "discovery_only" if attached else "no_verified_update")
+                        news_by_symbol[symbol]["evidence_grade"] = "full" if full_text else ("headline" if headline else None)
                 if broad_search and len(result.sources) < source_limit:
                     try:
                         broad = await _search_events(dependencies.research, "recent Federal Reserve economic policy broad stock market material developments", 3, request.reporting_cutoff)
+                        reference = request.reporting_cutoff or datetime.now(timezone.utc)
                         for source in broad[:2]:
-                            if source.url in seen or source.published_at and source.published_at > (request.reporting_cutoff or result.created_at) or request.reporting_cutoff and source.published_at is None:
+                            if source.url in seen or source.published_at and source.published_at > reference or request.reporting_cutoff and source.published_at is None:
                                 continue
-                            if not _macro_matches(source) or not _recent_event(source, request.reporting_cutoff or result.created_at):
+                            if not _macro_matches(source) or not _recent_event(source, reference):
                                 continue
-                            if hasattr(dependencies.research, "retrieve"):
+                            if hasattr(dependencies.research, "retrieve") and source.content_type != "news_feed":
                                 try:
                                     source = await dependencies.research.retrieve(source)
                                 except Exception:
@@ -392,7 +427,7 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                     from .agent import generate_narrative
                     safe_request = request.model_copy(update={"snapshot": snapshot, "include_suggestions": bool(request.include_suggestions and profile_complete), "investment_profile": profile.model_dump() if profile else None})
                     narrative = await generate_narrative(dependencies.model, safe_request, result.metrics, result.sources)
-                    valid_ids = {s.id for s in result.sources if s.content_type in {"retrieved_page", "official_feed"}}
+                    valid_ids = {s.id for s in result.sources if s.content_type in {"retrieved_page", "official_feed", "news_feed"}}
                     evidence_by_id = {source.id: source for source in result.sources}
                     for finding in narrative.findings[:4 if request.report_length == "brief" else 12]:
                         cited = [evidence_by_id[identifier] for identifier in finding.evidence_ids if identifier in valid_ids]
@@ -418,7 +453,7 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
         result.coverage = _coverage(result, request, dependencies)
         return result
     # Informational calculation notes do not by themselves indicate a degraded run.
-    degraded = (dependencies.model is None or dependencies.research is None or not any(source.content_type in {"retrieved_page", "official_feed"} for source in result.sources)
+    degraded = (dependencies.model is None or dependencies.research is None or not any(source.content_type in {"retrieved_page", "official_feed", "news_feed"} for source in result.sources)
                 or not result.metrics["coverage_complete"] or any(
                     text in warning for warning in result.warnings for text in ("unavailable", "exceeds", "future", "exhausted", "withheld", "invalid")))
     result.status = "partial" if degraded else "success"

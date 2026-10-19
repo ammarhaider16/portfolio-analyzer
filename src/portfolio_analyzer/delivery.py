@@ -120,8 +120,13 @@ def _metric_rows(value: Any, path: tuple[str, ...] = ()) -> list[tuple[str, str]
     return rows
 
 
-def render_report(result: Any, percent_only: bool = False) -> tuple[str, str]:
-    """Render a short decision-focused briefing; raw metrics stay in the JSON API."""
+def render_report(result: Any, percent_only: bool = False, embed: bool = False) -> tuple[str, str]:
+    """Render a short decision-focused briefing; raw metrics stay in the JSON API.
+
+    ``embed`` drops the leading page title when the HTML is shown inside the
+    dashboard card, which already carries its own heading. Plain-text output and
+    email delivery keep the title (``embed`` never affects ``lines``).
+    """
     data = _data(result)
     metrics = data.get("metrics", {})
     coverage = data.get("coverage") or {}
@@ -157,6 +162,7 @@ def render_report(result: Any, percent_only: bool = False) -> tuple[str, str]:
             paragraph("Coverage or freshness limitations apply. Review the dashboard before relying on these figures.")
     else:
         if coverage.get("summary"):
+            section("Bottom line")
             paragraph(str(coverage["summary"]))
         findings = [_data(item) for item in data.get("findings", [])]
         substantive = [item for item in findings if item.get("title") != "Portfolio overview"]
@@ -193,10 +199,18 @@ def render_report(result: Any, percent_only: bool = False) -> tuple[str, str]:
             section("What matters now")
             paragraph("No supported portfolio insight is available for this run. Review the portfolio measures and data limitations below.")
         position_news = coverage.get("position_news") or metrics.get("position_news", [])
+        detailed = data.get("report_length") == "detailed" or metrics.get("report_length") == "detailed"
+
+        def status_sentence(symbol: str, item: dict) -> str:
+            return {
+                "search_failed": f"{symbol}: news search failed in this run",
+                "not_checked": f"{symbol}: news was not checked in this run",
+                "discovery_only": f"{symbol}: relevant headlines were found but not verified",
+            }.get(item.get("status"), f"{symbol}: no verified recent position news found")
+
         if position_news:
             section("News affecting your holdings")
             details = {item["symbol"]: item for item in metrics.get("position_details", [])}
-            detailed = data.get("report_length") == "detailed" or metrics.get("report_length") == "detailed"
             entries = position_news if detailed else [item for item in position_news if item.get("status") == "verified"]
             for item in entries:
                 symbol = item["symbol"]
@@ -220,40 +234,51 @@ def render_report(result: Any, percent_only: bool = False) -> tuple[str, str]:
                 linked = False
                 for source_id in item.get("source_ids", []):
                     source = source_map.get(source_id)
-                    if not source or source.get("content_type") not in {"retrieved_page", "official_feed"} or not _safe_url(str(source.get("url", ""))):
+                    if not source or source.get("content_type") not in {"retrieved_page", "official_feed", "news_feed"} or not _safe_url(str(source.get("url", ""))):
                         continue
                     date = str(source.get("published_at") or "date unavailable")[:10]
+                    grade = " (headline only, not verified)" if source.get("content_type") == "news_feed" else ""
                     label = str(source.get("title") or source.get("publisher") or "Source")
-                    lines.append(f"{symbol}: {label} ({date}): {source['url']}")
-                    body += f'<p><strong>{escape(symbol)}</strong>: <a href="{escape(source["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a> <small>{escape(date)}</small></p>'
+                    lines.append(f"{symbol}: {label}{grade} ({date}): {source['url']}")
+                    body += f'<p><strong>{escape(symbol)}</strong>: <a href="{escape(source["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a>{escape(grade)} <small>{escape(date)}</small></p>'
                     linked = True
                 if detailed and not linked:
-                    paragraph(f"{symbol}: no verified recent position news found" if item.get("status") != "not_checked" else f"{symbol}: news was not checked in this run")
-            quiet = [item["symbol"] for item in position_news if item.get("status") != "verified"]
-            if not detailed and quiet:
-                paragraph(f"No verified recent position news for {', '.join(quiet[:12])}{' and others' if len(quiet) > 12 else ''}. Check coverage notes for search limits and connection status.")
-            section("Market and policy developments")
-            setup_ids = metrics.get("setup_news_source_ids", [])
-            if setup_ids:
-                paragraph("These developments may matter to portfolio exposure; the source alone does not establish a price effect.")
-            for source_id in setup_ids:
-                source = source_map.get(source_id)
-                if source and _safe_url(str(source.get("url", ""))):
-                    label = str(source.get("title") or "Source")
-                    lines.append(f"{label}: {source['url']}")
-                    body += f'<p><a href="{escape(source["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a></p>'
-            if not setup_ids:
-                status = metrics.get("setup_news_status")
-                paragraph({"unavailable": "Market and policy news search was unavailable for this run.",
-                           "not_checked": "Market and policy news was not checked within this run's search limit.",
-                           "search_failed": "Market and policy news search failed for this run."}.get(
-                               status, "No verified recent market or policy development was found for this run."))
+                    paragraph(status_sentence(symbol, item))
+            if not detailed:
+                quiet = [item["symbol"] for item in position_news if item.get("status") == "no_verified_update"]
+                if quiet:
+                    paragraph(f"No recent qualifying news found for {', '.join(quiet[:12])}{' and others' if len(quiet) > 12 else ''}. These holdings were checked against the configured sources.")
+                failed = [item["symbol"] for item in position_news if item.get("status") == "search_failed"]
+                if failed:
+                    paragraph(f"News search failed for {', '.join(failed[:12])}{' and others' if len(failed) > 12 else ''}. Check the search connection; these holdings were not checked.")
+                unchecked = [item["symbol"] for item in position_news if item.get("status") == "not_checked"]
+                if unchecked:
+                    paragraph(f"News was not checked for {', '.join(unchecked[:12])}{' and others' if len(unchecked) > 12 else ''}; increase the search limit or time budget to cover every holding.")
+                discovery = [item["symbol"] for item in position_news if item.get("status") == "discovery_only"]
+                if discovery:
+                    paragraph(f"Relevant headlines were found but not verified for {', '.join(discovery[:12])}{' and others' if len(discovery) > 12 else ''}. The dashboard labels these as headline only (not verified) alongside the limits of this briefing.")
+        section("Market and policy developments")
+        setup_ids = metrics.get("setup_news_source_ids", [])
+        if setup_ids:
+            paragraph("These developments may matter to portfolio exposure; the source alone does not establish a price effect.")
+        for source_id in setup_ids:
+            source = source_map.get(source_id)
+            if source and _safe_url(str(source.get("url", ""))):
+                label = str(source.get("title") or "Source")
+                lines.append(f"{label}: {source['url']}")
+                body += f'<p><a href="{escape(source["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a></p>'
+        if not setup_ids:
+            status = metrics.get("setup_news_status")
+            paragraph({"unavailable": "Market and policy news search was unavailable for this run.",
+                       "not_checked": "Market and policy news was not checked within this run's search limit.",
+                       "search_failed": "Market and policy news search failed for this run."}.get(
+                           status, "No verified recent market or policy development was found for this run."))
         rows = []
         missing = coverage.get("missing_price_symbols") or metrics.get("missing_prices", [])
         unsupported = coverage.get("unsupported_symbols") or metrics.get("unsupported", [])
         excluded = list(dict.fromkeys([*missing, *unsupported]))
-        for key, label in (("known_value", "Known valued assets"), ("cash_weight_pct", "Cash allocation of valued assets"),
-                           ("largest_position_pct", "Largest valued holding"), ("total_positions", "Holdings")):
+        for key, label in (("known_value", "Known portfolio value"), ("cash_weight_pct", "Cash share of holdings we could price"),
+                           ("largest_position_pct", "Largest holding we could price"), ("total_positions", "Holdings")):
             if key == "largest_position_pct" and not metrics.get("total_positions"):
                 continue
             if key in metrics and metrics[key] is not None:
@@ -281,6 +306,20 @@ def render_report(result: Any, percent_only: bool = False) -> tuple[str, str]:
                 paragraph(warning)
         if data.get("error"):
             paragraph("Analysis could not be completed. Check the dashboard for recovery steps.")
+        next_steps = []
+        for issue in coverage.get("issues", []):
+            step = {"portfolio": "Review holdings and cash, then add any missing prices.",
+                    "research": "Set up and test current-event search in the research connections.",
+                    "model": "Configure and test a research model for written event analysis."}.get(issue.get("action"))
+            if step and step not in next_steps:
+                next_steps.append(step)
+        if next_steps:
+            section("What to do next")
+            for step in next_steps[:4]:
+                paragraph(step)
+        elif coverage:
+            section("What to do next")
+            paragraph("No action is needed right now. Keep holdings and cash current, then run a briefing when the market or your positions change.")
 
     style = ('body{font:16px/1.55 system-ui,sans-serif;color:#182629;background:#f4f6f3;margin:0;padding:20px}'
              'main{max-width:760px;margin:auto;background:white;padding:clamp(20px,5vw,42px)}'
@@ -291,8 +330,9 @@ def render_report(result: Any, percent_only: bool = False) -> tuple[str, str]:
              'table{border-collapse:collapse;width:100%}caption{text-align:left}th,td{padding:.55em 0;border-bottom:1px solid #dbe2df}'
              'th{text-align:left;font-weight:500}td{text-align:right;font-variant-numeric:tabular-nums}'
              'a{color:#155c64}a:focus-visible{outline:3px solid #c47528;outline-offset:3px}')
+    heading = "" if embed else "<h1>Betafolio briefing</h1>"
     html = ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>Betafolio briefing</title><style>{style}</style></head><body><main><h1>Betafolio briefing</h1>{body}</main></body></html>')
+            f'<title>Betafolio briefing</title><style>{style}</style></head><body><main>{heading}{body}</main></body></html>')
     return html, "\n\n".join(lines)
 
 

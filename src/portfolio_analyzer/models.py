@@ -105,6 +105,8 @@ class AnalysisRequest(Contract):
 
 
 class Evidence(Contract):
+    # content_type values: "search_excerpt" (discovery only), "retrieved_page", "official_feed",
+    # and "news_feed" (a dated headline plus link; headline-grade evidence, not article text).
     id: str
     url: str
     title: str
