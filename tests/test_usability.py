@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer.delivery import render_report
+from portfolio_analyzer.delivery import briefing_summary, render_report
 from portfolio_analyzer.engine import EngineDependencies, _macro_matches, _recent_event, analyze_portfolio
 from portfolio_analyzer.models import AnalysisRequest, Evidence, PortfolioSnapshot, Position
 from portfolio_analyzer.storage import Store
@@ -46,12 +46,12 @@ def test_unpriced_holding_is_named_next_to_denominator_and_limitation():
     assert "Current-event research was unavailable" in text
 
 
-def test_history_uses_coverage_summary_and_csv_template_is_downloadable(tmp_path):
+def test_history_uses_meaningful_summary_and_csv_template_is_downloadable(tmp_path):
     store = Store(tmp_path)
     result = analyze([], cash="100")
     assert store.create_run(result.run_id)
     store.finish(result)
-    assert store.history()[0]["summary"] == result.coverage["summary"]
+    assert store.history()[0]["summary"] == briefing_summary(result)
     with TestClient(create_app(tmp_path), base_url="http://127.0.0.1:8000") as client:
         response = client.get("/api/import/template")
         assert response.status_code == 200

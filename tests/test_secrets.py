@@ -31,7 +31,7 @@ def keyring_store(tmp_path, monkeypatch):
     fake = FakeKeyring()
     monkeypatch.setitem(sys.modules, 'keyring', fake)
     for key in list(os.environ):
-        if key.startswith('PORTFOLIO_SECRET_') or key in {'LITELLM_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'TAVILY_API_KEY', 'ALPHA_VANTAGE_API_KEY'}:
+        if key.startswith('PORTFOLIO_SECRET_') or key in {'LITELLM_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'TAVILY_API_KEY'}:
             monkeypatch.delenv(key)
     return SecretStore(tmp_path), fake
 

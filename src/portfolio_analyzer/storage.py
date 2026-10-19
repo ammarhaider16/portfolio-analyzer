@@ -23,6 +23,10 @@ class Store:
             """)
             if "summary" not in {row[1] for row in db.execute("PRAGMA table_info(runs)")}:
                 db.execute("ALTER TABLE runs ADD COLUMN summary TEXT")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
+            for name, default in (("research_activity", "[]"), ("research_budget", "{}")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
 
     @contextmanager
     def db(self):
@@ -60,14 +64,28 @@ class Store:
         return True
 
     def update_run(self, run_id, **changes):
-        allowed = {"status", "result", "error", "delivery", "summary"}
+        allowed = {"status", "result", "error", "delivery", "summary", "research_activity", "research_budget"}
         if not changes or set(changes) - allowed:
             raise ValueError("Invalid run update")
         with self.db() as db:
             db.execute("UPDATE runs SET " + ",".join(f"{key}=?" for key in changes) + " WHERE id=?", (*changes.values(), run_id))
 
     def finish(self, result: AnalysisResult):
-        self.update_run(result.run_id, status=result.status, result=result.model_dump_json(), summary=result.coverage.get("summary"))
+        from .delivery import briefing_summary
+        summary = briefing_summary(result)
+        self.update_run(result.run_id, status=result.status, result=result.model_dump_json(), summary=summary,
+                        research_activity=json.dumps(result.research_activity), research_budget=json.dumps(result.research_budget))
+
+    def append_activity(self, run_id: str, event: dict, budget: dict) -> None:
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT research_activity FROM runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                return
+            events = json.loads(row[0] or "[]")
+            events.append(event)
+            db.execute("UPDATE runs SET research_activity=?,research_budget=? WHERE id=?",
+                       (json.dumps(events[-500:]), json.dumps(budget), run_id))
 
     def claim_delivery(self, run_id):
         with self.db() as db:
@@ -76,7 +94,12 @@ class Store:
     def run(self, run_id):
         with self.db() as db:
             row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        record = dict(row)
+        for key, default in (("research_activity", "[]"), ("research_budget", "{}")):
+            record[key] = json.loads(record.get(key) or default)
+        return record
 
     def delete_run(self, run_id):
         """Remove one finished report; active runs are never deleted here."""

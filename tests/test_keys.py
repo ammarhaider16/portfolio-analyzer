@@ -32,7 +32,7 @@ class FakeKeyring:
 @pytest.fixture(autouse=True)
 def credentials(tmp_path, monkeypatch):
     for key in list(os.environ):
-        if key.startswith('PORTFOLIO_') or key in {'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LITELLM_API_KEY', 'TAVILY_API_KEY', 'ALPHA_VANTAGE_API_KEY'}:
+        if key.startswith('PORTFOLIO_') or key in {'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LITELLM_API_KEY', 'TAVILY_API_KEY'}:
             monkeypatch.delenv(key)
     monkeypatch.setitem(sys.modules, 'keyring', FakeKeyring())
 
@@ -54,7 +54,7 @@ def test_status_secrets_and_storage_shape(tmp_path):
         status = client.get('/api/status').json()
         secrets = status['secrets']
         for name in ('model_api_key', 'model_api_key_colgate', 'model_api_key_openai', 'model_api_key_anthropic',
-                     'model_api_key_custom', 'tavily_api_key', 'alpha_vantage_api_key', 'smtp_password'):
+                     'model_api_key_custom', 'tavily_api_key', 'smtp_password'):
             assert set(secrets[name]) == {'present', 'source', 'saved_at', 'provider', 'editable', 'managed_by', 'env'}
         assert secrets['model_api_key_openai']['provider'] == 'openai'
         assert secrets['tavily_api_key']['provider'] is None
@@ -160,7 +160,7 @@ def test_test_endpoint_uses_value_without_persisting(tmp_path, monkeypatch):
         captured['key'] = api_key
         return object()
 
-    async def fake_generate(model, request, metrics, sources):
+    async def fake_generate(model, request, metrics, sources, **kwargs):
         return None
 
     monkeypatch.setattr(web, 'create_model', fake_create)

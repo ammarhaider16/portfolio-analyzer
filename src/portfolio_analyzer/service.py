@@ -38,7 +38,6 @@ MODEL_PROVIDER_ALIASES = {
 }
 SECRET_ALIASES = {
     "tavily_api_key": ("TAVILY_API_KEY",),
-    "alpha_vantage_api_key": ("ALPHA_VANTAGE_API_KEY",),
 }
 # The shared pre-Phase-3 name, kept readable only to migrate existing installs.
 LEGACY_MODEL_SLOT = "model_api_key"
@@ -162,7 +161,7 @@ def secret_status(settings, store, server=False):
     secrets[LEGACY_MODEL_SLOT] = describe_secret(store, used, (value, source), provider=settings.model.provider,
                                                  saved_at_name=used, env_names=model_env_names(settings.model.provider),
                                                  aliases=active_aliases, server=server)
-    for name in ("tavily_api_key", "alpha_vantage_api_key", "smtp_password"):
+    for name in ("tavily_api_key", "smtp_password"):
         aliases = SECRET_ALIASES.get(name, ())
         resolved = resolve_secret(store, name, aliases)
         secrets[name] = describe_secret(store, name, resolved, provider=None, saved_at_name=name,
@@ -189,7 +188,7 @@ def create_model(settings, secret_store, api_key=None):
     return ChatOpenAI(model=cfg.model, api_key=key, base_url=base, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=30, max_retries=1)
 
 
-def build_research(settings, secret_store, tavily_key=None, alpha_key=None):
+def build_research(settings, secret_store, tavily_key=None):
     fallback = None
     if settings.search_provider == "tavily":
         key = read_secret(secret_store, "tavily_api_key") if tavily_key is None else tavily_key
@@ -208,16 +207,11 @@ def build_research(settings, secret_store, tavily_key=None, alpha_key=None):
             providers.append(SecFilingsResearchProvider(sec_user_agent=sec_user_agent))
         if settings.ticker_news_enabled:
             providers.append(TickerNewsFeedProvider(sources=settings.news_feed_sources))
-        if settings.alpha_vantage_enabled:
-            from .providers import AlphaVantageResearchProvider
-            key = read_secret(secret_store, "alpha_vantage_api_key") if alpha_key is None else alpha_key
-            if key:
-                providers.append(AlphaVantageResearchProvider(key))
     return CompositeResearchProvider(providers) if providers else None
 
 
-def build_dependencies(settings, secret_store, model_key=None, tavily_key=None, alpha_key=None):
-    research = build_research(settings, secret_store, tavily_key=tavily_key, alpha_key=alpha_key)
+def build_dependencies(settings, secret_store, model_key=None, tavily_key=None):
+    research = build_research(settings, secret_store, tavily_key=tavily_key)
     model = create_model(settings, secret_store, api_key=model_key) if settings.model_enabled else None
     return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.market_data_enabled else None,
                               instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model)
@@ -334,11 +328,13 @@ class ApplicationService:
 
     def request_for(self, snapshot, **overrides):
         settings = self.settings
-        defaults = {name: getattr(settings, name) for name in ("investment_profile", "benchmark", "max_searches", "max_seconds", "max_data_age_hours", "position_review_threshold_pct", "sector_review_threshold_pct", "report_length")}
+        defaults = {name: getattr(settings, name) for name in ("investment_profile", "benchmark", "max_searches", "max_model_calls", "max_tool_calls", "max_seconds", "max_data_age_hours", "position_review_threshold_pct", "sector_review_threshold_pct", "report_length")}
         defaults.update(overrides)
         # Owner budgets are hard ceilings for dashboard/API callers.
         defaults["max_searches"] = min(defaults["max_searches"], settings.max_searches)
         defaults["max_seconds"] = min(defaults["max_seconds"], settings.max_seconds)
+        defaults["max_model_calls"] = min(defaults["max_model_calls"], settings.max_model_calls)
+        defaults["max_tool_calls"] = min(defaults["max_tool_calls"], settings.max_tool_calls)
         defaults["max_data_age_hours"] = min(defaults["max_data_age_hours"], settings.max_data_age_hours)
         return AnalysisRequest(snapshot=snapshot, **defaults)
 
@@ -380,6 +376,7 @@ class ApplicationService:
                 safe_settings = settings.model_copy(update={"model_enabled": False})
                 dependencies = build_dependencies(safe_settings, self.secrets)
                 startup_warning = "Model connection could not be initialized; review model settings. Metrics and available research are shown."
+            dependencies.activity_sink = lambda event, budget: self.store.append_activity(run_id, event, budget)
             result = await analyze_portfolio(request, dependencies)
             result.run_id = run_id
             if source == "stored":

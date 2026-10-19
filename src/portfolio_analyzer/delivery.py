@@ -180,6 +180,29 @@ def _percentage_rows(value: Any, path: tuple[str, ...] = ()) -> list[tuple[str, 
     return [(label, f"{number:.1f}".rstrip("0").rstrip(".") + "%")]
 
 
+def briefing_summary(data: Any) -> str:
+    """Provide a substantive, backward-compatible opening without inventing news."""
+    data = _data(data)
+    summary = _data(data.get("executive_summary") or {})
+    if summary.get("text"):
+        return str(summary["text"])
+    findings = [_data(item) for item in data.get("findings", [])]
+    supported = next((item for item in findings if item.get("evidence_ids")
+                      and item.get("title") != "Portfolio overview"), None)
+    if supported:
+        return str(supported.get("detail") or supported.get("title"))
+    metrics = data.get("metrics") or {}
+    weights = metrics.get("weights_pct") or {}
+    valued = [(symbol, number) for symbol, value in weights.items()
+              if (number := _number(value)) is not None]
+    if valued:
+        symbol, weight = max(valued, key=lambda item: item[1])
+        return (f"{symbol} represents {weight:.1f}% of the holdings and cash we could value. "
+                "This run did not establish a sourced current-event conclusion.")
+    return ("This run did not establish a supported current-event conclusion. "
+            "Review research coverage and data notes for unchecked sources or incomplete research.")
+
+
 def render_report(result: Any, percent_only: bool = False, embed: bool = False,
                   timezone: str = "America/New_York") -> tuple[str, str]:
     """Render a short decision-focused briefing; raw metrics stay in the JSON API.
@@ -222,9 +245,16 @@ def render_report(result: Any, percent_only: bool = False, embed: bool = False,
         if data.get("warnings"):
             paragraph("Coverage or freshness limitations apply. Review the dashboard before relying on these figures.")
     else:
-        if coverage.get("summary"):
-            section("Bottom line")
-            paragraph(str(coverage["summary"]))
+        section("Briefing summary")
+        paragraph(briefing_summary(data))
+        summary_ids = (_data(data.get("executive_summary") or {})).get("evidence_ids", [])
+        for entry in data.get("sources", []):
+            source = _data(entry)
+            url = str(source.get("url", ""))
+            if source.get("id") in summary_ids and _safe_url(url):
+                label = str(source.get("title") or source.get("publisher") or "Source")
+                lines.append(f"Summary source: {label}: " + ("link available in the dashboard" if _opaque_aggregator(url) else url))
+                body += f'<a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a> '
         findings = [_data(item) for item in data.get("findings", [])]
         substantive = [item for item in findings if item.get("title") != "Portfolio overview"]
         substantive.sort(key=lambda item: (not bool(item.get("evidence_ids")), str(item.get("kind", "")) != "risk"))
@@ -407,6 +437,9 @@ def render_report(result: Any, percent_only: bool = False, embed: bool = False,
             section("Possible adjustments")
             for suggestion in data["suggestions"][:4]:
                 paragraph(str(suggestion))
+        if coverage.get("summary"):
+            section("Research coverage")
+            paragraph(str(coverage["summary"]))
         issues = [str(item.get("message", "")) for item in coverage.get("issues", []) if item.get("message")]
         warnings = list(dict.fromkeys(str(warning) for warning in data.get("warnings", [])))
         notes = []

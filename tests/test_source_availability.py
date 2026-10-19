@@ -72,7 +72,7 @@ def test_probes_use_ticker_and_market_paths_and_test_full_fallback(monkeypatch):
     sec = SecFilingsResearchProvider()
     outcomes = asyncio.run(probe_research_sources(CompositeResearchProvider([official, sec, ticker])))
     assert {key: row["status"] for key, row in outcomes.items()} == {
-        "official_feeds": "empty", "search": "empty", "sec_filings": "skipped", "ticker_news": "failed"}
+        "fed": "empty", "search": "empty", "sec_filings": "skipped", "google_news": "empty", "nasdaq": "failed"}
     assert ("google_news", "AAPL") in calls and ("nasdaq", "AAPL") in calls
     assert "secret" not in str(outcomes)
     assert any(call[0] == "search" and "Federal Reserve" in call[1] for call in calls)
@@ -81,12 +81,10 @@ def test_probes_use_ticker_and_market_paths_and_test_full_fallback(monkeypatch):
 def test_partial_official_failure_persists(monkeypatch):
     provider = PrimaryFeedResearchProvider()
     async def mixed(url, **kwargs):
-        if "bls.gov" in url:
-            raise SourceHTTPError(403)
         return "<rss><channel><item><title>Inflation update</title><link>https://federalreserve.gov/update</link></item></channel></rss>"
     monkeypatch.setattr(provider, "_fetch", mixed)
     assert asyncio.run(provider.search("inflation"))
-    assert source_diagnostics(provider)["official_feeds"]["status"] == "failed"
+    assert source_diagnostics(provider)["fed"]["status"] == "passed"
 
 
 def test_duplicate_url_preserves_stronger_evidence():
@@ -141,26 +139,121 @@ def test_source_probes_run_independently_and_keep_timeout(monkeypatch):
         ready = asyncio.Event()
         async def fetch(url, **kwargs):
             calls.append(url)
-            if len(calls) == 2:
-                ready.set()
+            ready.set()
             await ready.wait()
-            if "bls.gov" in url:
-                raise TimeoutError()
-            return "<rss><channel><item><title>Market update</title></item></channel></rss>"
+            return "<rss><channel><item><title>Market update</title><link>https://www.federalreserve.gov/update</link></item></channel></rss>"
         monkeypatch.setattr(providers, "retrieve_public_text", fetch)
         return await asyncio.wait_for(probe_research_sources(PrimaryFeedResearchProvider()), timeout=1)
     outcomes = asyncio.run(exercise())
-    assert len(calls) == 2
-    assert outcomes["official_feeds"]["status"] == "failed"
-    assert outcomes["official_feeds"]["reason"] == "Source request timed out"
+    assert len(calls) == 1
+    assert outcomes["fed"]["status"] == "passed"
 
 
-def test_alpha_probe_uses_actual_portfolio_symbol(monkeypatch):
-    provider = providers.AlphaVantageResearchProvider("never exposed")
+def test_symbol_candidate_dispatch_reaches_general_search():
     calls = []
-    async def search(query, max_results=3):
-        calls.append(query)
+    class GeneralSearch:
+        async def search(self, query, max_results=3):
+            calls.append(query)
+            return []
+    provider = CompositeResearchProvider([GeneralSearch()])
+    asyncio.run(provider.search_symbol_candidates("AAPL", name="Apple Inc"))
+    assert calls == ["AAPL Apple Inc latest news"]
+    assert source_diagnostics(provider)["search"]["status"] == "empty"
+
+
+def test_asset_tool_search_preserves_analyst_focus_and_ticker(monkeypatch):
+    calls = []
+    provider = TickerNewsFeedProvider(sources=("google_news", "nasdaq"))
+    async def entries(feed, query, symbol, name, cutoff):
+        calls.append((feed, query, symbol, name))
         return []
-    monkeypatch.setattr(provider, "search", search)
-    assert asyncio.run(probe_research_sources(provider, symbol="MSFT"))["alpha_vantage"]["status"] == "empty"
-    assert calls[0].split()[0] == "MSFT"
+    monkeypatch.setattr(provider, "_source_entries", entries)
+    asyncio.run(providers.search_asset_query(provider, "AAPL", "Apple Inc", "AAPL supplier disruption material exposure"))
+    assert calls == [
+        ("google_news", "AAPL supplier disruption material exposure", "AAPL", "Apple Inc"),
+        ("nasdaq", "AAPL supplier disruption material exposure", "AAPL", "Apple Inc"),
+    ]
+
+
+def test_composite_candidates_keep_fast_results_when_sibling_times_out(monkeypatch):
+    evidence = Evidence(id="fast", url="https://example.com/news", publisher="example.com", title="Current news")
+    class Fast:
+        async def search(self, query, max_results=3):
+            return [evidence]
+    class Slow:
+        async def search(self, query, max_results=3):
+            await asyncio.sleep(10)
+    monkeypatch.setattr(providers, "SOURCE_CHILD_SECONDS", .02)
+    composite = CompositeResearchProvider([Fast(), Slow()])
+    assert asyncio.run(composite.search_symbol_candidates("AAPL")) == [evidence]
+
+
+def test_four_parallel_tools_share_four_leaf_source_slots():
+    async def exercise():
+        active = peak = calls = 0
+        class Source:
+            async def search(self, query, max_results=3):
+                nonlocal active, peak, calls
+                active += 1
+                peak = max(peak, active)
+                calls += 1
+                try:
+                    # Nested same-task network work must reuse the held slot.
+                    async with providers.source_network_slot():
+                        await asyncio.sleep(.005)
+                    return []
+                finally:
+                    active -= 1
+        composite = CompositeResearchProvider([CompositeResearchProvider([Source()])] + [Source() for _ in range(5)])
+        with providers.source_network_scope():
+            await asyncio.wait_for(asyncio.gather(*(composite.search_symbol_candidates("AAPL") for _ in range(4))), timeout=1)
+        assert calls == 24
+        assert peak == 4
+        assert active == 0
+    asyncio.run(exercise())
+
+
+def test_partial_collector_has_total_deadline_including_slot_queue(monkeypatch):
+    async def exercise():
+        evidence = Evidence(id="fast", url="https://example.com/news", publisher="example.com", title="Current news")
+        class Fast:
+            async def search(self, query, max_results=3):
+                return [evidence]
+        class Slow:
+            async def search(self, query, max_results=3):
+                await asyncio.sleep(10)
+        monkeypatch.setattr(providers, "SOURCE_CHILD_SECONDS", .03)
+        with providers.source_network_scope(limit=1):
+            result = await asyncio.wait_for(CompositeResearchProvider([Fast(), Slow(), Slow()]).search_symbol_candidates("AAPL"), timeout=.15)
+        assert result == [evidence]
+    asyncio.run(exercise())
+
+
+def test_composite_asset_query_retains_sec_and_focus(monkeypatch):
+    calls = []
+    sec = SecFilingsResearchProvider("Analyst contact@example.com")
+    ticker = TickerNewsFeedProvider(sources=("google_news",))
+    async def sec_search(symbol, name, **kwargs):
+        calls.append(("sec", symbol))
+        return []
+    async def ticker_search(feed, query, symbol, name, cutoff):
+        calls.append((feed, query, symbol))
+        return []
+    monkeypatch.setattr(sec, "search_symbol", sec_search)
+    monkeypatch.setattr(ticker, "_source_entries", ticker_search)
+    asyncio.run(providers.search_asset_query(CompositeResearchProvider([sec, ticker]), "AAPL", "Apple", "supply chain risk"))
+    assert ("sec", "AAPL") in calls
+    assert ("google_news", "supply chain risk", "AAPL") in calls
+
+
+def test_source_registry_supports_independent_tool_selection():
+    ticker = TickerNewsFeedProvider()
+    official = PrimaryFeedResearchProvider()
+    registry = providers.research_tool_sources(CompositeResearchProvider([ticker, official]))
+    assert set(registry) == {"fed", "google_news", "nasdaq"}
+    assert registry["fed"].sources == ("fed",)
+    assert registry["nasdaq"].sources == ("nasdaq",)
+    assert not supports_market_wide(registry["nasdaq"])
+    assert registry["fed"].source_outcomes is official.source_outcomes
+
+

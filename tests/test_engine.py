@@ -97,7 +97,7 @@ def test_supplied_snapshot_time_is_not_claimed_as_price_timestamp():
 
 def test_invalid_model_citations_and_suggestion_gate(monkeypatch):
     from portfolio_analyzer.models import ResearchNarrative, Finding
-    async def narrative(model, request, metrics, sources):
+    async def narrative(model, request, metrics, sources, **kwargs):
         assert not request.include_suggestions
         return ResearchNarrative(findings=[Finding(title="Unsupported", detail="Claim", evidence_ids=["invented"])], suggestions=["Sell everything"])
     monkeypatch.setattr("portfolio_analyzer.agent.generate_narrative", narrative)
@@ -147,8 +147,9 @@ def test_langchain_parent_tool_accepts_json_without_app_configuration():
 
 def test_profile_types_and_source_evidence_required(monkeypatch):
     from portfolio_analyzer.models import ResearchNarrative, Finding
-    async def narrative(model, request, metrics, sources):
+    async def narrative(model, request, metrics, sources, **kwargs):
         assert request.include_suggestions
+        sources.append(Evidence(id="one", url="https://example.com", title="Apple Inc disclosure", publisher="example.com", content_type="retrieved_page"))
         return ResearchNarrative(findings=[Finding(title="Uncited market claim", detail="Price move explained"), Finding(title="Backed disclosure", detail="Company disclosed results", evidence_ids=["one"], affected_symbols=["AAPL"])], suggestions=["Review allocation in light of your objectives"])
     class Research:
         async def search(self, *args, **kwargs):
@@ -306,7 +307,8 @@ def test_identity_lookup_has_shared_timeout_and_preserves_fast_results():
 
 def test_generated_issuer_findings_need_symbol_and_macro_needs_broad_source(monkeypatch):
     from portfolio_analyzer.models import PortfolioSnapshot, Position, ResearchNarrative, Finding
-    async def narrative(model, request, metrics, sources):
+    async def narrative(model, request, metrics, sources, **kwargs):
+        sources.append(Evidence(id="macro", url="https://example.com/fed", title="Federal Reserve interest rates", publisher="example.com", published_at=datetime.now(timezone.utc), content_type="retrieved_page"))
         return ResearchNarrative(findings=[
             Finding(title="Issuer without symbol", detail="Issuer disclosed a result", evidence_ids=["issuer"]),
             Finding(title="Issuer with symbol", detail="Issuer disclosed a result", evidence_ids=["issuer"], affected_symbols=["AAPL"]),

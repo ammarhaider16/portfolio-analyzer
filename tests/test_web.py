@@ -16,7 +16,7 @@ from portfolio_analyzer.web import create_app
 def isolated_credentials(monkeypatch):
     values = {}
     for key in list(os.environ):
-        if key.startswith(('PORTFOLIO_',)) or key in {'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LITELLM_API_KEY', 'TAVILY_API_KEY', 'ALPHA_VANTAGE_API_KEY'}:
+        if key.startswith(('PORTFOLIO_',)) or key in {'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LITELLM_API_KEY', 'TAVILY_API_KEY'}:
             monkeypatch.delenv(key)
     monkeypatch.setattr(SecretStore, 'get', lambda self, name: os.environ.get('PORTFOLIO_SECRET_' + name.upper(), values.get(name)))
     monkeypatch.setattr(SecretStore, 'set', lambda self, name, value: values.__setitem__(name, value))
@@ -273,7 +273,7 @@ def test_model_connection_probe_uses_real_portfolio_metrics(tmp_path, monkeypatc
     marker = object()
     monkeypatch.setattr(web, 'create_model', lambda *args: marker)
     calls = []
-    async def generate(model, request, metrics, sources):
+    async def generate(model, request, metrics, sources, **kwargs):
         assert model is marker
         assert metrics['position_values']
         assert set(metrics['position_values']) == {p.symbol for p in request.snapshot.positions}

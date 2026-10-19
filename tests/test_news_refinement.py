@@ -90,7 +90,7 @@ def test_engine_clusters_before_two_story_cap_and_exposes_extra_stories():
     assert len(entry["stories"]) == 2
     assert entry["stories"][0]["related_report_count"] == 1
     assert len(entry["additional_stories"]) == 1
-    assert result.metrics["setup_news_reason"] == "insufficient_holdings"
+    assert result.metrics["setup_news_reason"] == "budget_exhausted"
     assert len(result.sources) == 4
 
 

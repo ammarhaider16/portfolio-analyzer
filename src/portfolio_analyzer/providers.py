@@ -6,15 +6,81 @@ import ipaddress
 import re
 import socket
 import time
-from urllib.parse import quote, urlparse
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, asynccontextmanager
+from contextvars import ContextVar
+from weakref import WeakKeyDictionary
+from urllib.parse import quote, urlparse, urljoin
 from .models import Evidence, PortfolioSnapshot
 from .source_status import record_outcome, safe_source_error, valid_sec_contact
+
+
+_SOURCE_WORKERS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="public-source")
+SOURCE_REQUEST_SECONDS = 15.0
+SOURCE_CHILD_SECONDS = 6.0
+_RUN_SOURCE_LIMIT = ContextVar("run_source_limit", default=None)
+_SOURCE_SLOT_OWNER = ContextVar("source_slot_owner", default=None)
+_LOOP_SOURCE_LIMITS = WeakKeyDictionary()
+
+
+@contextmanager
+def source_network_scope(limit=4):
+    """Install one source-operation limit shared by every task in a run."""
+    token = _RUN_SOURCE_LIMIT.set(asyncio.Semaphore(limit))
+    try:
+        yield
+    finally:
+        _RUN_SOURCE_LIMIT.reset(token)
+
+
+@asynccontextmanager
+async def source_network_slot():
+    """Bound leaf adapters; nested work in the same task reuses its slot."""
+    task = asyncio.current_task()
+    if _SOURCE_SLOT_OWNER.get() is task:
+        yield
+        return
+    limiter = _RUN_SOURCE_LIMIT.get()
+    if limiter is None:
+        loop = asyncio.get_running_loop()
+        limiter = _LOOP_SOURCE_LIMITS.setdefault(loop, asyncio.Semaphore(4))
+    async with limiter:
+        token = _SOURCE_SLOT_OWNER.set(task)
+        try:
+            yield
+        finally:
+            _SOURCE_SLOT_OWNER.reset(token)
+
+
+async def _run_source_worker(function, *args):
+    """Uncancellable library calls retain the same bounded worker capacity."""
+    cancelled = threading.Event()
+    def call():
+        if cancelled.is_set():
+            raise TimeoutError("Source request cancelled before starting")
+        return function(*args)
+    future = asyncio.get_running_loop().run_in_executor(_SOURCE_WORKERS, call)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        cancelled.set()
+        future.cancel()
+        raise
 
 
 class SourceHTTPError(ValueError):
     def __init__(self, status_code: int):
         self.status_code = status_code
         super().__init__(f"HTTP {status_code}")
+
+
+class SourceAccessError(ValueError):
+    """A classified provider error containing only safe, predefined metadata."""
+    def __init__(self, category: str, reason: str):
+        self.category = category
+        self.safe_reason = reason
+        super().__init__(reason)
 
 
 def validate_public_url(url: str) -> str:
@@ -28,50 +94,134 @@ def validate_public_url(url: str) -> str:
 
 
 async def retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool = False, user_agent: str = "PortfolioResearch/1.0") -> str:
+    async with source_network_slot():
+        return await _retrieve_public_text(url, max_bytes, raw=raw, user_agent=user_agent)
+
+
+async def _retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool = False, user_agent: str = "PortfolioResearch/1.0") -> str:
     """Fetch with DNS pinning to close validation/connection rebinding gaps."""
     import http.client
     import ssl
 
-    hostname = (urlparse(url).hostname or "").lower().rstrip(".")
-    if (hostname == "sec.gov" or hostname.endswith(".sec.gov")) and not valid_sec_contact(user_agent):
-        raise ValueError("SEC filings were not checked because an identifying contact is missing or invalid")
+    cancelled = threading.Event()
+    state_lock = threading.Lock()
+    active = [None]
+    deadline = time.monotonic() + SOURCE_REQUEST_SECONDS
 
-    def fetch() -> str:
-        validate_public_url(url)
-        parsed = urlparse(url)
+    def stop():
+        cancelled.set()
+        with state_lock:
+            sock = active[0]
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                sock.close()
+
+    def remaining():
+        seconds = deadline - time.monotonic()
+        if cancelled.is_set() or seconds <= 0:
+            raise TimeoutError("Source request timed out")
+        return seconds
+
+    def track(sock):
+        with state_lock:
+            if cancelled.is_set():
+                sock.close()
+                raise TimeoutError("Source request timed out")
+            active[0] = sock
+
+    def fetch_one(current_url):
+        remaining()
+        hostname = (urlparse(current_url).hostname or "").lower().rstrip(".")
+        is_sec = hostname == "sec.gov" or hostname.endswith(".sec.gov")
+        if is_sec and not valid_sec_contact(user_agent):
+            raise SourceAccessError("configuration", "SEC filings were not checked because an identifying contact is missing or invalid")
+        validate_public_url(current_url)
+        remaining()
+        parsed = urlparse(current_url)
         addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
         address = addresses[0][4][0]
         if any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
             raise ValueError("Unsafe DNS destination")
-        connection = http.client.HTTPSConnection(parsed.hostname, timeout=15, context=ssl.create_default_context())
+        connection = http.client.HTTPSConnection(parsed.hostname, timeout=remaining(), context=ssl.create_default_context())
         # The TCP destination is pinned while TLS still verifies the original hostname.
         def connect():
-            sock = socket.create_connection((address, 443), timeout=15)
-            connection.sock = connection._context.wrap_socket(sock, server_hostname=parsed.hostname)
+            sock = socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET, socket.SOCK_STREAM)
+            track(sock)
+            sock.settimeout(remaining())
+            sock.connect((address, 443))
+            tls_sock = connection._context.wrap_socket(sock, server_hostname=parsed.hostname, do_handshake_on_connect=False)
+            track(tls_sock)
+            connection.sock = tls_sock
+            tls_sock.settimeout(remaining())
+            tls_sock.do_handshake()
         connection.connect = connect
         try:
             path = parsed.path or "/"
             if parsed.query:
                 path += "?" + parsed.query
-            connection.request("GET", path, headers={"User-Agent": user_agent, "Accept": "text/html,text/plain,application/atom+xml,application/rss+xml,application/xml"})
+            # A contact supplied for SEC is never forwarded to another origin.
+            request_agent = user_agent if is_sec or not valid_sec_contact(user_agent) else "PortfolioResearch/1.0"
+            connection.request("GET", path, headers={"User-Agent": request_agent, "Accept": "text/html,text/plain,application/atom+xml,application/rss+xml,application/xml"})
             response = connection.getresponse()
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.getheader("Location")
+                if not location:
+                    raise SourceHTTPError(response.status)
+                return None, urljoin(current_url, location)
             if response.status != 200:
                 raise SourceHTTPError(response.status)
             if not any(t in response.getheader("Content-Type", "") for t in ("text/html", "text/plain", "xml", "json")):
                 raise ValueError("Unsupported source content type")
             content = response.read(max_bytes + 1)
+            remaining()
             if len(content) > max_bytes:
                 content = content[:max_bytes]
             if raw:
-                return content.decode("utf-8", errors="replace")
+                return content.decode("utf-8", errors="replace"), None
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(content, "html.parser")
             for element in soup(["script", "style", "nav", "footer"]):
                 element.decompose()
-            return soup.get_text(" ", strip=True)[:20000]
+            return soup.get_text(" ", strip=True)[:20000], None
         finally:
             connection.close()
-    return await asyncio.to_thread(fetch)
+            with state_lock:
+                if active[0] is not None:
+                    active[0].close()
+                active[0] = None
+    def fetch() -> str:
+        remaining()  # Cancelled/expired queued work must never start a request.
+        timer = threading.Timer(remaining(), stop)
+        timer.daemon = True
+        timer.start()
+        try:
+            current_url = url
+            seen = set()
+            for _ in range(4):
+                if current_url in seen:
+                    raise SourceAccessError("redirect", "Source redirect loop")
+                seen.add(current_url)
+                content, target = fetch_one(current_url)
+                if target is None:
+                    return content
+                current_url = target
+            raise SourceAccessError("redirect", "Source redirect limit exceeded")
+        except Exception as error:
+            if cancelled.is_set():
+                raise TimeoutError("Source request timed out") from error
+            raise
+        finally:
+            timer.cancel()
+    future = asyncio.get_running_loop().run_in_executor(_SOURCE_WORKERS, fetch)
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        stop()
+        future.cancel()
+        raise
 
 
 def _evidence(url: str, title: str, excerpt: str) -> Evidence:
@@ -131,7 +281,7 @@ class DDGSResearchProvider:
         def search():
             from ddgs import DDGS
             return [_evidence(row["href"], row.get("title", "Source"), row.get("body", "")) for row in DDGS(timeout=15).text(query, max_results=max_results)]
-        return await asyncio.to_thread(search)
+        return await _run_source_worker(search)
 
     async def retrieve(self, source: Evidence) -> Evidence:
         content = await retrieve_public_text(source.url)
@@ -147,7 +297,7 @@ class YFinanceMarketDataProvider:
         def fetch():
             import yfinance as yf
             return yf.Ticker(symbol).get_info()
-        info = await asyncio.to_thread(fetch)
+        info = await _run_source_worker(fetch)
         if not isinstance(info, dict) or str(info.get("symbol", "")).upper() != symbol.upper():
             return None
         type_map = {"EQUITY": "stock", "ETF": "etf", "MUTUALFUND": "mutual_fund", "INDEX": "index"}
@@ -175,7 +325,7 @@ class YFinanceMarketDataProvider:
             return yf.Ticker(symbol).history(period="5d", auto_adjust=False, timeout=10)
         for position in result.positions:
             if self.refresh_existing or position.price is None:
-                history = await asyncio.to_thread(fetch, position.symbol)
+                history = await _run_source_worker(fetch, position.symbol)
                 if not history.empty:
                     from decimal import Decimal
                     position.price = Decimal(str(history["Close"].iloc[-1]))
@@ -201,7 +351,7 @@ class YFinanceMarketDataProvider:
                                progress=False, threads=True, group_by="ticker", timeout=10)
 
         try:
-            data = await asyncio.to_thread(fetch)
+            data = await _run_source_worker(fetch)
         except Exception:
             return {}
         if data is None or getattr(data, "empty", True):
@@ -235,7 +385,7 @@ class YFinanceMarketDataProvider:
             return {str(date.date()): float(price) for date, price in prices["Close"].items()} if not prices.empty else {}
         results = {}
         for symbol in dict.fromkeys(p.symbol for p in snapshot.positions):
-            history = await asyncio.to_thread(fetch, symbol)
+            history = await _run_source_worker(fetch, symbol)
             if history:
                 results[symbol] = history
         return results
@@ -247,13 +397,16 @@ class PrimaryFeedResearchProvider:
     Supply an identifying contact user agent to enable SEC fair-access requests.
     SEC's current feed is not exhaustive company filings coverage.
     """
-    def __init__(self, fallback=None, sec_user_agent: str | None = None):
+    FEEDS = {"fed": "https://www.federalreserve.gov/feeds/press_all.xml"}
+
+    def __init__(self, fallback=None, sec_user_agent: str | None = None, sources=None):
         self.fallback = fallback
         self.sec_user_agent = sec_user_agent
         self._feed_cache: dict[str, tuple[float, str]] = {}
         self._feed_lock = asyncio.Lock()
         self._last_sec_request = 0.0
         self.source_outcomes = {}
+        self.sources = tuple(source for source in (sources if sources is not None else self.FEEDS) if source in self.FEEDS)
 
     async def _fetch(self, url: str, *, raw: bool = False) -> str:
         async with self._feed_lock:
@@ -276,11 +429,12 @@ class PrimaryFeedResearchProvider:
         from xml.etree import ElementTree
         from email.utils import parsedate_to_datetime
         from datetime import datetime
-        feeds = ["https://www.federalreserve.gov/feeds/press_all.xml", "https://www.bls.gov/feed/bls_latest.rss"]
+        feeds = [(source, self.FEEDS[source]) for source in self.sources]
         # SEC company data has its own explicitly enabled, contact-gated provider.
         terms = {word.lower() for word in re.findall(r"[A-Za-z]{3,}", query)} - {"latest", "investor", "relations", "material"}
         found = []
-        for url in feeds:
+        for source_id, url in feeds:
+            before = len(found)
             try:
                 raw = await self._fetch(url, raw=True)
                 root = ElementTree.fromstring(raw)
@@ -308,10 +462,10 @@ class PrimaryFeedResearchProvider:
                             source.published_at = source.published_at.replace(tzinfo=timezone.utc)
                     source.content_type = "official_feed"
                     found.append(source)
+                record_outcome(self, source_id, "passed" if len(found) > before else "empty", "" if len(found) > before else "No matching official updates")
             except Exception as error:
-                record_outcome(self, "official_feeds", "failed", safe_source_error(error))
+                record_outcome(self, source_id, "failed", safe_source_error(error))
                 continue
-        record_outcome(self, "official_feeds", "passed" if found else "empty", "" if found else "No matching official updates")
         if self.fallback and len(found) < max_results:
             before_fallback = len(found)
             try:
@@ -348,6 +502,22 @@ def _interleave_candidates(groups, limit=36):
     """Give each consulted adapter/feed a bounded share before story clustering."""
     return _dedupe_sources([group[index] for index in range(max((len(group) for group in groups), default=0))
                             for group in groups if index < len(group)])[:limit]
+
+
+async def _partial_source_groups(requests):
+    """Return completed sources before the caller's overall discovery timeout."""
+    tasks = [asyncio.create_task(request) for request in requests]
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=SOURCE_CHILD_SECONDS) if tasks else (set(), set())
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        return [task.result() for task in tasks if task in done and not task.cancelled() and task.exception() is None]
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _local_name(tag) -> str:
@@ -565,7 +735,7 @@ class TickerNewsFeedProvider:
 
     SOURCES = ("google_news", "nasdaq", "bing_news")
     GOOGLE_NEWS_URL = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    NASDAQ_URL = "https://nasdaq.com/feed/rssoutbound?symbol={symbol}"
+    NASDAQ_URL = "https://www.nasdaq.com/feed/rssoutbound?symbol={symbol}"
     BING_NEWS_URL = "https://www.bing.com/news/search?q={query}&format=RSS"
 
     def __init__(self, sources=("google_news", "nasdaq"), timeout: float = 15, ttl: int = 300, fallback=None):
@@ -583,7 +753,8 @@ class TickerNewsFeedProvider:
             cached = self._cache.get(url)
             if cached and time.monotonic() - cached[0] < self.ttl:
                 return cached[1]
-            raw = await asyncio.wait_for(retrieve_public_text(url, max_bytes=500_000, raw=True), timeout=self.timeout)
+            async with asyncio.timeout(self.timeout):
+                raw = await retrieve_public_text(url, max_bytes=500_000, raw=True)
             self._cache[url] = (time.monotonic(), raw)
             return raw
 
@@ -658,10 +829,10 @@ class TickerNewsFeedProvider:
         for feed in self.sources:
             try:
                 entries = await self._source_entries(feed, query, symbol, name, reporting_cutoff)
-                record_outcome(self, "ticker_news", "passed" if entries else "empty", "" if entries else "No matching ticker news")
+                record_outcome(self, feed, "passed" if entries else "empty", "" if entries else "No matching ticker news")
                 groups.append(entries[:min(max_results, 12)])
             except Exception as error:
-                record_outcome(self, "ticker_news", "failed", safe_source_error(error))
+                record_outcome(self, feed, "failed", safe_source_error(error))
         if self.fallback is not None:
             try:
                 groups.append((await _probe_call(self.fallback, query, max_results=min(max_results, 12), reporting_cutoff=reporting_cutoff))[:12])
@@ -679,9 +850,9 @@ class TickerNewsFeedProvider:
         for source in self.sources:
             try:
                 entries = await self._source_entries(source, query, symbol, name, reporting_cutoff)
-                record_outcome(self, "ticker_news", "passed" if entries else "empty", "" if entries else "No matching ticker news")
+                record_outcome(self, source, "passed" if entries else "empty", "" if entries else "No matching ticker news")
             except Exception as error:
-                record_outcome(self, "ticker_news", "failed", safe_source_error(error))
+                record_outcome(self, source, "failed", safe_source_error(error))
                 continue
             for entry in entries:
                 if entry.url in seen:
@@ -707,9 +878,9 @@ class TickerNewsFeedProvider:
         for source in self.sources:
             try:
                 entries = await self._source_entries(source, query, symbol, None, reporting_cutoff)
-                record_outcome(self, "ticker_news", "passed" if entries else "empty", "" if entries else "No matching ticker news")
+                record_outcome(self, source, "passed" if entries else "empty", "" if entries else "No matching ticker news")
             except Exception as error:
-                record_outcome(self, "ticker_news", "failed", safe_source_error(error))
+                record_outcome(self, source, "failed", safe_source_error(error))
                 continue
             for entry in entries:
                 if entry.url in seen:
@@ -753,23 +924,32 @@ class CompositeResearchProvider:
         return await self._candidates("search_events", query, max_results=max_results, reporting_cutoff=reporting_cutoff)
 
     async def _candidates(self, method, query, *, name=None, max_results=12, reporting_cutoff=None):
-        groups = []
-        for provider in self.providers:
+        async def collect(provider):
             if method == "search_events" and not supports_market_wide(provider):
-                continue
+                return []
             handler = getattr(provider, method + "_candidates", None) or getattr(provider, method, None)
-            if handler is None:
-                continue
             try:
-                kwargs = {"max_results": min(max_results, 12), "reporting_cutoff": reporting_cutoff}
-                if method == "search_symbol":
-                    kwargs["name"] = name
-                items = await handler(query, **kwargs)
-                groups.append(items)
+                async with source_network_slot():
+                    async with asyncio.timeout(SOURCE_CHILD_SECONDS):
+                        kwargs = {"max_results": min(max_results, 12), "reporting_cutoff": reporting_cutoff}
+                        if handler is None:
+                            items = await _probe_call(provider, f"{query} {name or ''} latest news" if method == "search_symbol" else query, **kwargs)
+                        elif method == "search_symbol":
+                            kwargs["name"] = name
+                            items = await handler(query, **kwargs)
+                        else:
+                            items = await handler(query, **kwargs)
                 if not isinstance(provider, (SecFilingsResearchProvider, PrimaryFeedResearchProvider, TickerNewsFeedProvider)):
                     record_outcome(provider, _source_id(provider), "passed" if items else "empty", "" if items else "No matching updates")
+                return items
             except Exception as error:
-                record_outcome(provider, _source_id(provider), "failed", safe_source_error(error))
+                ids = provider.sources if isinstance(provider, (PrimaryFeedResearchProvider, TickerNewsFeedProvider)) else (_source_id(provider),)
+                for source in ids:
+                    record_outcome(provider, source, "failed", safe_source_error(error))
+                return []
+        # Flatten fallback/feed adapters so each source has an independent bound.
+        adapters = [adapter for child in self.providers for adapter in research_tool_sources(child).values()]
+        groups = await _partial_source_groups(collect(adapter) for adapter in adapters)
         return _interleave_candidates(groups)
 
     async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
@@ -801,10 +981,11 @@ class CompositeResearchProvider:
         results: list[Evidence] = []
         for provider in self.providers:
             handler = getattr(provider, "search_symbol", None)
-            if handler is None:
-                continue
             try:
-                results.extend(await handler(symbol, name, max_results=max_results, reporting_cutoff=reporting_cutoff))
+                if handler is None:
+                    results.extend(await _probe_call(provider, f"{symbol} {name or ''} latest news", max_results=max_results, reporting_cutoff=reporting_cutoff))
+                else:
+                    results.extend(await handler(symbol, name, max_results=max_results, reporting_cutoff=reporting_cutoff))
             except Exception:
                 continue
         return _dedupe_sources(results)[:max_results]
@@ -822,7 +1003,7 @@ class CompositeResearchProvider:
 
 def supports_market_wide(provider) -> bool:
     """Query capability is explicit for adapters whose generic method is ticker-only."""
-    if provider is None or isinstance(provider, (SecFilingsResearchProvider, AlphaVantageResearchProvider)):
+    if provider is None or isinstance(provider, SecFilingsResearchProvider):
         return False
     if isinstance(provider, CompositeResearchProvider):
         return any(supports_market_wide(child) for child in provider.providers)
@@ -845,8 +1026,6 @@ def _source_id(provider):
         return "official_feeds"
     if isinstance(provider, TickerNewsFeedProvider):
         return "ticker_news"
-    if isinstance(provider, AlphaVantageResearchProvider):
-        return "alpha_vantage"
     return "search"
 
 
@@ -861,6 +1040,65 @@ def source_diagnostics(provider) -> dict:
     if fallback is not None:
         result.update(source_diagnostics(fallback))
     return result
+
+
+def research_tool_sources(provider) -> dict:
+    """Expose individual selectable adapters, sharing caches and diagnostic state."""
+    from copy import copy
+    if provider is None:
+        return {}
+    if isinstance(provider, CompositeResearchProvider):
+        result = {}
+        for child in provider.providers:
+            result.update(research_tool_sources(child))
+        return result
+    result = {}
+    if isinstance(provider, (PrimaryFeedResearchProvider, TickerNewsFeedProvider)):
+        if not hasattr(provider, "source_outcomes"):
+            provider.source_outcomes = {}
+        for source in provider.sources:
+            adapter = copy(provider)
+            adapter.sources = (source,)
+            adapter.fallback = None
+            if isinstance(adapter, PrimaryFeedResearchProvider):
+                adapter._feed_lock = asyncio.Lock()
+            else:
+                adapter._lock = asyncio.Lock()
+            result[source] = adapter
+    else:
+        result[_source_id(provider)] = provider
+    result.update(research_tool_sources(getattr(provider, "fallback", None)))
+    return result
+
+
+research_source_registry = research_tool_sources
+
+
+async def search_asset_query(provider, symbol, name, query, max_results=6, reporting_cutoff=None):
+    """Keep explicit asset identity and the analyst's research focus together."""
+    if isinstance(provider, CompositeResearchProvider):
+        async def collect(adapter):
+            try:
+                async with source_network_slot():
+                    async with asyncio.timeout(SOURCE_CHILD_SECONDS):
+                        return await search_asset_query(adapter, symbol, name, query, max_results, reporting_cutoff)
+            except Exception as error:
+                ids = adapter.sources if isinstance(adapter, (PrimaryFeedResearchProvider, TickerNewsFeedProvider)) else (_source_id(adapter),)
+                for source in ids:
+                    record_outcome(adapter, source, "failed", safe_source_error(error))
+                return []
+        groups = await _partial_source_groups(collect(adapter) for child in provider.providers for adapter in research_tool_sources(child).values())
+        return _interleave_candidates(groups)
+    async with source_network_slot():
+        return await _search_asset_leaf(provider, symbol, name, query, max_results, reporting_cutoff)
+
+
+async def _search_asset_leaf(provider, symbol, name, query, max_results, reporting_cutoff):
+    if isinstance(provider, TickerNewsFeedProvider):
+        return await provider._candidates(query, symbol, name, max_results, reporting_cutoff)
+    if isinstance(provider, SecFilingsResearchProvider):
+        return await provider.search_symbol(symbol, name, max_results=max_results, reporting_cutoff=reporting_cutoff)
+    return await _probe_call(provider, query, max_results=max_results, reporting_cutoff=reporting_cutoff)
 
 
 async def _probe_call(provider, query, *, max_results=3, reporting_cutoff=None):
@@ -885,34 +1123,38 @@ async def probe_research_sources(provider, symbol="AAPL", name=None) -> dict:
         record_outcome(provider, source_id, "skipped", "SEC filings were not checked because an identifying contact is missing or invalid")
         return source_diagnostics(provider)
     fallback = getattr(provider, "fallback", None)
-    async def bounded_probe(request):
+    async def bounded_probe(request, diagnostic_id=source_id):
         try:
             items = await asyncio.wait_for(request, timeout=8)
-            record_outcome(provider, source_id, "passed" if items else "empty", "" if items else "No matching updates")
+            record_outcome(provider, diagnostic_id, "passed" if items else "empty", "" if items else "No matching updates")
         except Exception as error:
-            record_outcome(provider, source_id, "failed", "Source request timed out" if isinstance(error, TimeoutError) else safe_source_error(error))
+            record_outcome(provider, diagnostic_id, "failed", safe_source_error(error))
 
-    async def official_feed(url):
-        # A probe does not share the run-time feed lock: every source gets its own
-        # bounded request, so one stalled feed cannot hide another source's result.
-        raw = await retrieve_public_text(url, max_bytes=500_000, raw=True)
-        return _feed_items(raw)
+    async def official_feed(source):
+        # Exercise production evidence parsing, with independent locks so a
+        # blocked feed cannot prevent a working feed's diagnostic from finishing.
+        from copy import copy
+        probe = copy(provider)
+        probe.sources = (source,)
+        probe.fallback = None
+        probe._feed_lock = asyncio.Lock()
+        return await probe.search("", max_results=3)
 
     if isinstance(provider, PrimaryFeedResearchProvider):
-        requests = [official_feed(url) for url in ("https://www.federalreserve.gov/feeds/press_all.xml", "https://www.bls.gov/feed/bls_latest.rss")]
+        requests = [(source, official_feed(source)) for source in provider.sources]
     elif isinstance(provider, TickerNewsFeedProvider):
         from copy import copy
         requests = []
         for feed in provider.sources:
             probe = copy(provider)
             probe._lock = asyncio.Lock()
-            requests.append(probe._source_entries(feed, probe._symbol_query(symbol, name), symbol, name, None))
+            requests.append((feed, probe._source_entries(feed, probe._symbol_query(symbol, name), symbol, name, None)))
     elif isinstance(provider, SecFilingsResearchProvider):
-        requests = [provider.search_symbol(symbol, name, max_results=3)]
+        requests = [(source_id, provider.search_symbol(symbol, name, max_results=3))]
     else:
-        query = f"{symbol} latest company news" if isinstance(provider, AlphaVantageResearchProvider) else "Federal Reserve inflation market policy"
-        requests = [_probe_call(provider, query, max_results=3)]
-    jobs = [bounded_probe(request) for request in requests]
+        query = "Federal Reserve inflation market policy"
+        requests = [(source_id, _probe_call(provider, query, max_results=3))]
+    jobs = [bounded_probe(request, diagnostic_id) for diagnostic_id, request in requests]
     if fallback is not None:
         jobs.append(probe_research_sources(fallback, symbol, name))
     await asyncio.gather(*jobs)
@@ -923,31 +1165,3 @@ async def probe_research_sources(provider, symbol="AAPL", name=None) -> dict:
     return results
 
 
-class AlphaVantageResearchProvider:
-    """Optional NEWS_SENTIMENT adapter; paid access may be required."""
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-
-    async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
-        import httpx
-        from datetime import datetime, timezone
-        symbol = query.split()[0].upper()
-        if not symbol.replace(".", "").replace("-", "").isalnum():
-            raise ValueError("Invalid ticker")
-        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
-            response = await client.get("https://www.alphavantage.co/query", params={"function": "NEWS_SENTIMENT", "tickers": symbol, "limit": max_results, "apikey": self.api_key})
-            response.raise_for_status()
-            body = response.json()
-            if "feed" not in body:
-                raise ValueError("News access unavailable or quota exhausted")
-            result = []
-            for row in body["feed"][:max_results]:
-                source = _evidence(row["url"], row.get("title", "News"), row.get("summary", ""))
-                if row.get("time_published"):
-                    source.published_at = datetime.strptime(row["time_published"], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
-                result.append(source)
-            return result
-
-    async def retrieve(self, source: Evidence) -> Evidence:
-        content = await retrieve_public_text(source.url)
-        return source.model_copy(update={"excerpt": content, "content_type": "retrieved_page"})

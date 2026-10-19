@@ -1,5 +1,29 @@
 {
   "$defs": {
+    "BriefingSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "maxLength": 1600,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 30,
+          "title": "Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "BriefingSummary",
+      "type": "object"
+    },
     "Evidence": {
       "additionalProperties": false,
       "properties": {
@@ -184,6 +208,30 @@
       },
       "title": "Findings",
       "type": "array"
+    },
+    "executive_summary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BriefingSummary"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "research_activity": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Research Activity",
+      "type": "array"
+    },
+    "research_budget": {
+      "additionalProperties": true,
+      "title": "Research Budget",
+      "type": "object"
     },
     "sources": {
       "items": {

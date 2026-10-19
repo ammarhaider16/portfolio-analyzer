@@ -6,7 +6,7 @@ The research engine is an asynchronous Python library. Manual portfolio maintena
 Saved manual/CSV/image portfolio or supplied snapshot
                  |
                  v
-Validate holdings -> deterministic metrics -> bounded research -> validated narrative
+Validate holdings -> deterministic metrics -> tool-using analyst -> validated findings
                  |                                               |
                  +---------------- AnalysisResult ----------------+
                                       |
@@ -51,11 +51,11 @@ Optional injected dependencies are:
 
 | Dependency | Interface | Included implementations |
 | --- | --- | --- |
-| `research` | `async search(query, max_results=3) -> list[Evidence]`; optional `async search_symbol(symbol, name, max_results=3, reporting_cutoff=None)`; optional `async retrieve(evidence) -> Evidence` | Tavily, DDGS, official Fed/BLS feeds, SEC current and per-company filings, keyless ticker news feeds (Google News/Nasdaq), Alpha Vantage |
+| `research` | `async search(query, max_results=3) -> list[Evidence]`; optional `async search_symbol(symbol, name, max_results=3, reporting_cutoff=None)`; optional `async retrieve(evidence) -> Evidence` | Tavily, DDGS, Federal Reserve updates, SEC current and per-company filings, keyless ticker news feeds (Google News/Nasdaq) |
 | `market_data` | `async enrich(snapshot) -> PortfolioSnapshot`; optional `async history(snapshot) -> dict[symbol, dict[ISO-date, float]]` | yfinance |
 | `model` | Configured LangChain chat model supporting tools | OpenAI-compatible and Anthropic integrations configured by the application |
 
-Credentials belong to the injected providers, never to request JSON. A missing model produces a partial metrics report; providers are not enabled implicitly. The model receives up to 30 largest holdings and 12 source excerpts, with an overall context-size cap. The underlying model's token limit and request retries must also be configured by its caller.
+Credentials belong to the injected providers, never to request JSON. A missing model produces a partial metrics report; providers are not enabled implicitly. The model receives the complete holding roster and lightweight initial coverage evidence, with an overall context-size cap. It chooses further queries, sources, and retrieval through registered read-only tools; source excerpts remain untrusted data. The underlying model's token limit and request retries must also be configured by its caller.
 
 ## Contracts and evidence
 
@@ -73,7 +73,7 @@ Suggestions are opt-in for each request. The investment profile requires nonblan
 
 ## Budgets, cancellation, and deployment boundaries
 
-`max_searches` bounds logical search calls, not individual HTTP requests inside a provider. Requests allow at most 30 searches and 600 seconds; the default search ceiling is 30. `EngineDependencies.hard_search_limit` and `hard_seconds_limit` can impose stricter caller-controlled ceilings; requesting larger limits cannot override them. The engine checks up to four holdings concurrently, takes at most two matching sources per holding, and caps the total at 62 URLs. Broad market/policy search uses a remaining search slot. All positions receive a news-coverage state, including `not_checked` when the search budget is insufficient. Detailed reports list price context and news status for every saved holding, while the synthesis model still sees only 30 holdings and 12 source excerpts. Official feeds cache public responses for five minutes, and identified SEC access is paced. Narrative validation failures are not automatically retried by the agent.
+`max_searches` bounds logical discovery queries, not individual HTTP requests within an adapter. Defaults are 30 queries, 120 seconds, eight model calls, and 40 research tool calls; owner settings are ceilings for dashboard and parent-agent requests. The initial coverage pass uses at most eight queries and a third of the discovery budget when a model is enabled. The analyst chooses follow-up investigations; no fixed twelve-source shortlist limits it. Network tools allow at most four concurrent operations and reserve up to 20 seconds for finalization. Sources are registered with stable evidence IDs and grade-preserving URL deduplication, bounded to 200 records. Deterministic presentation groups stories after collection; it does not decide which sources the analyst may investigate. Detailed reports retain a coverage entry for every holding. Official feeds cache public responses for five minutes, and identified SEC access is paced. Zero findings and zero recommendations are valid outcomes.
 
 The elapsed-time budget includes waiting for the shared concurrency semaphore. A budget timeout returns a partial report with completed calculations. Cancellation propagates as `asyncio.CancelledError`; it does not produce a misleading success. A synchronous network operation already dispatched to a worker thread may finish after cancellation, subject to its own timeout, but additional symbol requests stop. Hosts must enforce their own authenticated request quotas and reuse dependency limits when exposing the library as a service.
 
@@ -139,6 +139,17 @@ Credentials resolve through one documented precedence order: the `PORTFOLIO_SECR
 
 Source adapters publish sanitized `source_outcomes` using passed/empty/skipped/failed/disabled states. `POST /api/test/search` probes configured sources independently and persists outcomes under `connection_tests.search.sources`; `/api/status` exposes these without credentials. Result coverage includes run-specific source outcomes and named skipped/failed-source issues. SEC contact validation gates every sec.gov request before DNS access.
 
-Position-news entries retain legacy status/source IDs and add `stories` and `additional_stories`. Stories retain their representative/member evidence IDs, best evidence grade, affected symbols, publisher metadata, category, and related-report count. `metrics.position_news_display_order` controls deterministic value-based rendering; `setup_news_reason` explains skipped broad searches. Existing stored reports without these fields use a rendering fallback. Clustering and ranking do not add model calls; presentation metadata is excluded from synthesis input and the existing twelve-source evidence limit remains.
+Position-news entries retain legacy status/source IDs and add `stories` and `additional_stories`. Stories retain their representative/member evidence IDs, best evidence grade, affected symbols, publisher metadata, category, and related-report count. `metrics.position_news_display_order` controls deterministic value-based rendering; `setup_news_reason` explains skipped broad searches. Existing stored reports without these fields use a rendering fallback. Clustering and ranking do not add model calls; presentation metadata is excluded from the analyst prompt. The analyst can select additional evidence through its research tools.
 
 `render_report` and `send_report` accept an optional timezone (default America/New_York); dashboard, CLI, and email callers pass the configured schedule timezone. Raw JSON timestamps remain ISO formatted.
+
+
+## Tool-using analyst and observable activity
+
+The LangChain analyst has `search_asset_news`, `search_research`, `retrieve_public_page`, and `lookup_market_data` tools. Source selection is explicit and capability-based; configured Federal Reserve updates, news feeds, general search, and SEC filings remain available independently. Discovery tools accept free-form focus queries. Tool outputs include evidence IDs, raw bounded excerpts, publisher/date metadata, grades, and remaining budgets. Factual findings and the optional `executive_summary` are independently checked against collected evidence; only accepted findings can support the summary. Adjustment suggestions remain explicitly requested and may be empty.
+
+`AnalysisResult` adds `executive_summary`, `research_activity`, and `research_budget`. Running `GET /api/runs/{id}` records expose activity and budgets before final results exist; SQLite migrations add these fields without changing old results. Cancellation and startup recovery retain observed activity. Activity records describe tool calls and outcomes, never private model reasoning. Report conclusions use the executive summary or an honest concrete fallback; operational coverage is labeled separately.
+
+Source probes distinguish Federal Reserve updates, Google News, Nasdaq, Bing News, search, and SEC. Transport follows at most three public HTTPS redirects, validates and pins DNS at every hop, and applies SEC contact rules to each destination. A blocked source remains visible while independent working sources can be used.
+
+Public page/feed requests use four retained worker slots and close tracked sockets on cancellation, with a 15-second absolute request deadline across redirects. A per-run source-operation semaphore also bounds composite adapter fan-out to four; completed sources survive slow siblings. Third-party DDGS/yfinance SDK operations retain their own timeout behavior and may finish after cancellation.

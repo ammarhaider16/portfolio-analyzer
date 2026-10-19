@@ -115,7 +115,7 @@ async function openReport(id, scroll=false) {
   $('#report-card').hidden=false;
   $('#send-report').hidden=!(state.settings.smtp && state.verified_recipient === state.settings.smtp.recipient);
   $('#report-summary').textContent='Loading conclusions…';
-  try { const row=await api(`/api/runs/${encoded}`); if(selectedReport===id) renderReportSummary(row); if(scroll) $('#report-card').scrollIntoView({behavior:'smooth',block:'start'}); }
+  try { const row=await api(`/api/runs/${encoded}`); if(selectedReport===id) {renderReportSummary(row);renderResearchActivity(row);} if(scroll) $('#report-card').scrollIntoView({behavior:'smooth',block:'start'}); }
   catch(error) { if(selectedReport===id) $('#report-summary').textContent=`Could not load the summary: ${error.message}`; }
 }
 
@@ -138,7 +138,12 @@ function renderReportSummary(row) {
   const result=row.result;if(!result){root.textContent='This report is still running.';$('#report-coverage').textContent='';return;}
   $('#report-date').textContent=`Positions as of ${dateLabel(result.snapshot_as_of)}`;
   const coverage=result.coverage||{};
-  $('#report-coverage').textContent=coverage.summary?`Bottom line: ${coverage.summary}`:'Bottom line: portfolio measures are available; see what we could check below.';
+  $('#report-coverage').textContent=coverage.summary?`Research coverage: ${coverage.summary}`:'';
+  const summaryTitle=document.createElement('h3');summaryTitle.textContent='Briefing summary';
+  const summary=document.createElement('p');summary.className='briefing-summary';summary.textContent=briefingSummary(result);root.append(summaryTitle,summary);
+  const summaryLinks=document.createElement('div');summaryLinks.className='insight-sources';
+  for(const id of result.executive_summary?.evidence_ids||[]){const source=(result.sources||[]).find(item=>item.id===id);if(!source)continue;try{const url=new URL(source.url);if(!['http:','https:'].includes(url.protocol)||url.username)continue;const link=document.createElement('a');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';link.textContent=source.title||source.publisher||'Source';summaryLinks.append(link);}catch{}}
+  if(summaryLinks.childElementCount)root.append(summaryLinks);
   const findings=(result.findings||[]).filter(item=>item.title!=='Portfolio overview').sort((a,b)=>Number(Boolean(b.evidence_ids?.length))-Number(Boolean(a.evidence_ids?.length))).slice(0,4);
   const matter=document.createElement('h3');matter.textContent='What matters now';root.append(matter);
   if(!findings.length){const empty=document.createElement('p');empty.className='insight-context';empty.textContent='No supported conclusion is available for this run. See what we could check below.';root.append(empty);}
@@ -151,7 +156,29 @@ function renderReportSummary(row) {
   const issues=(coverage.issues||[]).filter(issue=>issue&&issue.message);
   const nextTitle=document.createElement('h3');nextTitle.textContent='Data notes';root.append(nextTitle);
   if(issues.length){const issueList=document.createElement('ul');issueList.className='coverage-issues';for(const issue of issues.slice(0,2)){const li=document.createElement('li');li.append(document.createTextNode(issue.message+' '));if(issue.action){const label=issue.action==='portfolio'?'Fix holdings':issue.action==='model'?'Set up a model':'Set up research';const go=button(label,()=>goToIssue(issue.action));go.type='button';li.append(go);}issueList.append(li);}root.append(issueList);if(issues.length>2){const extra=document.createElement('details');const summary=document.createElement('summary');summary.textContent=`${issues.length-2} more data notes`;extra.append(summary);for(const issue of issues.slice(2)){const note=document.createElement('p');note.textContent=issue.message;extra.append(note);}root.append(extra);}}
-  else {const positive=document.createElement('p');positive.className='insight-context';positive.textContent='Nothing needs your attention right now. Re-run the briefing when your holdings or prices change.';root.append(positive);}
+  else {const positive=document.createElement('p');positive.className='insight-context';positive.textContent='No additional data notes were recorded for this run.';root.append(positive);}
+}
+
+function briefingSummary(result) {
+  if(result.executive_summary?.text)return result.executive_summary.text;
+  const finding=(result.findings||[]).find(item=>item.evidence_ids?.length&&item.title!=='Portfolio overview');
+  if(finding)return finding.detail||finding.title;
+  const weights=Object.entries(result.metrics?.weights_pct||{}).filter(([,value])=>Number.isFinite(Number(value))).sort((a,b)=>Number(b[1])-Number(a[1]));
+  if(weights.length)return `${weights[0][0]} represents ${Number(weights[0][1]).toFixed(1)}% of the holdings and cash we could value. This run did not establish a sourced current-event conclusion.`;
+  return 'This run did not establish a supported current-event conclusion. Review research coverage and data notes for unchecked sources or incomplete research.';
+}
+
+function renderResearchActivity(row) {
+  const card=$('#research-activity');if(!card)return;
+  const events=row?.research_activity||row?.result?.research_activity||[];
+  const budget=row?.research_budget||row?.result?.research_budget||{};
+  card.hidden=!row;if(!row)return;
+  $('#activity-status').textContent=`Run ${row.id?.slice(0,8)||''} · ${row.status||'complete'}`;
+  const labels={model_calls:'Model calls',tool_calls:'Tool calls',searches:'Discovery queries',elapsed_seconds:'Elapsed seconds',max_model_calls:'Model call limit',max_tool_calls:'Tool call limit',max_searches:'Query limit',max_seconds:'Time limit (seconds)'};
+  $('#activity-budget').textContent=Object.entries(budget).filter(([,value])=>typeof value==='number').map(([key,value])=>`${labels[key]||key.replaceAll('_',' ')}: ${Math.round(value*10)/10}`).join(' · ');
+  const list=$('#activity-entries');list.replaceChildren();
+  if(!events.length){const entry=document.createElement('li');entry.textContent=['queued','running'].includes(row.status)?'Waiting for the first research tool result…':'No tool activity was recorded for this report.';list.append(entry);}
+  for(const event of events){const entry=document.createElement('li');const title=document.createElement('strong');title.textContent=event.tool||'Research tool';const detail=document.createElement('span');const seconds=event.elapsed_seconds??(event.elapsed_ms===undefined?null:event.elapsed_ms/1000);detail.textContent=[event.asset||event.symbol,event.query,event.source,event.status,seconds===null?null:`${Number(seconds).toFixed(1)}s`].filter(Boolean).join(' · ');entry.append(title,detail);list.append(entry);}
 }
 
 function goToIssue(actionName){if(actionName==='portfolio'){view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});return;}view('connections');$('#research-setup').open=true;$('#research-setup').scrollIntoView({behavior:'smooth'});}
@@ -293,16 +320,17 @@ function updateResearchReadiness() {
   const settings=state.settings, tests=state.connection_tests||{}, hasPortfolio=Boolean(state.snapshot);
   const searchConfigured=settings.search_provider==='keyless'||(settings.search_provider==='tavily'&&state.secrets_present.tavily_api_key)||(settings.search_provider!=='disabled'&&(settings.primary_feeds_enabled||settings.sec_company_filings_enabled||settings.ticker_news_enabled));
   const modelConfigured=settings.model_enabled&&state.secrets_present.model_api_key;
+  const sourceTests=tests.search?.sources;
+  const testedWorkingSources=Object.values(sourceTests||{}).filter(item=>['passed','empty'].includes(item.status)).length;
   $('#cap-measures').textContent=hasPortfolio?'Ready from saved holdings and cash':'Add holdings or cash';
-  $('#cap-events').textContent=!searchConfigured?'Unavailable · set up search':tests.search?.status==='passed'?`Search tested ${dateLabel(tests.search.tested_at)}`:tests.search?.status==='failed'?'Search test failed · retry':'Search configured · test it';
+  $('#cap-events').textContent=!searchConfigured?'Unavailable · set up search':testedWorkingSources?`${testedWorkingSources} sources available${tests.search.status==='partial'?' · some sources need attention':''}`:tests.search?.status==='failed'||tests.search?.status==='partial'?'No tested source available · review source checks':'Search configured · test it';
   $('#cap-model').textContent=!modelConfigured?'Unavailable · add a model':tests.model?.status==='passed'?`Model tested ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?'Model test failed · retry':'Model configured · test it';
   $('#model-test-state').textContent=tests.model?.status==='passed'?`Last test passed ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?`Last test failed ${dateLabel(tests.model.tested_at)}`:'Connection not tested';
-  const sourceTests=tests.search?.sources;
   $('#search-test-state').textContent=sourceTests?`Source checks ${dateLabel(tests.search.tested_at)} · see individual outcomes`:tests.search?`Legacy aggregate test: ${tests.search.status}. Retest to check each source.`:'Sources not tested';
   const chips=$('#source-states');chips.replaceChildren();
   const enabled=settings.search_provider!=='disabled';
-  const sourceSettings={search:enabled,official_feeds:enabled&&settings.primary_feeds_enabled,sec_filings:enabled&&settings.sec_company_filings_enabled,ticker_news:enabled&&settings.ticker_news_enabled,alpha_vantage:enabled&&settings.alpha_vantage_enabled};
-  const sourceLabels={search:settings.search_provider==='tavily'?'Tavily':'Web search',official_feeds:'Fed / BLS',sec_filings:'SEC filings',ticker_news:'Ticker news',alpha_vantage:'Alpha Vantage'};
+  const sourceSettings={search:enabled,fed:enabled&&settings.primary_feeds_enabled,sec_filings:enabled&&settings.sec_company_filings_enabled,google_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('google_news'),nasdaq:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('nasdaq'),bing_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('bing_news')};
+  const sourceLabels={search:settings.search_provider==='tavily'?'Tavily':'Web search',fed:'Federal Reserve',sec_filings:'SEC filings',google_news:'Google News',nasdaq:'Nasdaq',bing_news:'Bing News'};
   for(const [name,active] of Object.entries(sourceSettings)){
     const result=sourceTests?.[name];const chip=document.createElement('span');chip.className='badge';
     const status=result?.status||(!active?'disabled':name==='sec_filings'&&!settings.sec_contact?'skipped':'not tested');
@@ -316,7 +344,7 @@ function updateResearchReadiness() {
   const question=$('#run-form').elements.question.value;
   const asksCurrent=/\b(recent|latest|today|now|news|events?|earnings|filings?)\b/i.test(question);
   const wantsIdeas=$('#run-form').elements.include_suggestions.checked;
-  const eventGap=asksCurrent&&!(searchConfigured&&modelConfigured&&tests.search?.status==='passed'&&tests.model?.status==='passed');
+  const eventGap=asksCurrent&&!(searchConfigured&&modelConfigured&&testedWorkingSources>0&&tests.model?.status==='passed');
   const ideaGap=wantsIdeas&&(!settings.investment_profile||!modelConfigured);
   const warning=$('#question-readiness');warning.hidden=!eventGap&&!ideaGap;
   if(!warning.hidden)warning.textContent=[eventGap?'A recent-events answer needs current-event search and a tested model. This run may show portfolio measures without answering that question.':'',ideaGap?'Adjustment ideas need a complete investment profile and a working model.':''].filter(Boolean).join(' ');
@@ -412,7 +440,7 @@ async function refresh(populate=false) {
   if (populate) {
     setForm('#model-form',{...s.model,enabled:s.model_enabled});
     setForm('#research-form',s); setForm('#preferences-form',s); setForm('#email-form',s.smtp);
-    for(const name of ['google_news','nasdaq']){const box=$('#research-form').elements.namedItem(`news_source_${name}`);if(box)box.checked=(s.news_feed_sources||[]).includes(name);}
+    for(const name of ['google_news','nasdaq','bing_news']){const box=$('#research-form').elements.namedItem(`news_source_${name}`);if(box)box.checked=(s.news_feed_sources||[]).includes(name);}
     setForm('#schedule-form',{...s.schedule,scheduled_email:s.scheduled_email});
     if (s.investment_profile) {const targets={...s.investment_profile.allocation_targets};for(const name of ['stocks','bonds','cash']){const input=$('#profile-form').elements.namedItem(`target_${name}`);input.value=targets[name]??'';delete targets[name];}setForm('#profile-form',{...s.investment_profile,allocation_targets:Object.keys(targets).length?JSON.stringify(targets,null,2):'', restrictions:(s.investment_profile.restrictions||[]).join('\n')});}
     if(snapshot) $('#run-source').value='stored';
@@ -430,6 +458,8 @@ async function refresh(populate=false) {
   updateSecAvailability();
   renderSecretStorage();
   renderHistory(state.history);
+  const activityRun=state.history.find(row=>['queued','running'].includes(row.status))||state.history.find(row=>row.id===selectedReport)||latest;
+  if(activityRun){try{renderResearchActivity(await api(`/api/runs/${encodeURIComponent(activityRun.id)}`));}catch{$('#activity-status').textContent='Activity temporarily unavailable; retrying on the next refresh.';}}
   if(latest && ['success','partial'].includes(latest.status) && latest.id!==lastAutoReport && !selectedReport) {openReport(latest.id); lastAutoReport=latest.id;}
   if(pendingRunId){const pending=state.history.find(row=>row.id===pendingRunId);if(pending&&['success','partial','failed'].includes(pending.status)){pendingRunId=null;notice(pending.status==='failed'?'Research failed. Check the run in history.':'Research finished. Conclusions and coverage are shown above.',pending.status==='failed');if(pending.status!=='failed')await openReport(pending.id,true);}}
 }
@@ -459,7 +489,6 @@ const PROVIDER_LABELS={colgate:'Colgate LiteLLM',openai:'OpenAI',anthropic:'Anth
 const SECRET_FIELDS=[
   {form:'#model-form',field:'key',key:'model_api_key',test:'model',title:'model'},
   {form:'#research-form',field:'key',key:'tavily_api_key',test:'search',title:'Tavily'},
-  {form:'#research-form',field:'alpha_key',key:'alpha_vantage_api_key',title:'Alpha Vantage'},
   {form:'#email-form',field:'password',key:'smtp_password',title:'mail password'}
 ];
 function secretText(info) {
@@ -586,11 +615,10 @@ if($('#login-form')) {
     notice('Model settings saved.');
   }));
   $('#research-form').addEventListener('submit',action(async()=>{
-    const data=values('#research-form'), tavily=(data.key||'').trim(), alpha=(data.alpha_key||'').trim();
-    await save({search_provider:data.search_provider,sec_contact:data.sec_contact,primary_feeds_enabled:checked('#research-form','primary_feeds_enabled'),sec_company_filings_enabled:checked('#research-form','sec_company_filings_enabled'),ticker_news_enabled:checked('#research-form','ticker_news_enabled'),news_feed_sources:['google_news','nasdaq'].filter(name=>checked('#research-form',`news_source_${name}`)),auto_prices_enabled:checked('#research-form','auto_prices_enabled'),price_refresh_minutes:Number(data.price_refresh_minutes),market_data_enabled:checked('#research-form','market_data_enabled'),alpha_vantage_enabled:checked('#research-form','alpha_vantage_enabled')},true);
+    const data=values('#research-form'), tavily=(data.key||'').trim();
+    await save({search_provider:data.search_provider,sec_contact:data.sec_contact,primary_feeds_enabled:checked('#research-form','primary_feeds_enabled'),sec_company_filings_enabled:checked('#research-form','sec_company_filings_enabled'),ticker_news_enabled:checked('#research-form','ticker_news_enabled'),news_feed_sources:['google_news','nasdaq','bing_news'].filter(name=>checked('#research-form',`news_source_${name}`)),auto_prices_enabled:checked('#research-form','auto_prices_enabled'),price_refresh_minutes:Number(data.price_refresh_minutes),market_data_enabled:checked('#research-form','market_data_enabled')},true);
     // Only store a provider's key when that provider is actually selected.
     if(data.search_provider==='tavily'&&tavily){await api('/api/secrets/tavily_api_key',{value:tavily});const input=$('#research-form').elements.key;input.value='';input.dataset.editing='false';}
-    if(checked('#research-form','alpha_vantage_enabled')&&alpha){await api('/api/secrets/alpha_vantage_api_key',{value:alpha});const input=$('#research-form').elements.alpha_key;input.value='';input.dataset.editing='false';}
     await refresh(); notice('Research settings saved.');
   }));
   document.querySelectorAll('[data-test]').forEach(el=>el.addEventListener('click',action(async()=>{el.disabled=true;notice('Testing the saved connection…');try{const result=await api(`/api/test/${el.dataset.test}`,{});notice(result.message);}finally{el.disabled=false;await refresh();}})));
@@ -602,7 +630,7 @@ if($('#login-form')) {
     updateSecAvailability();
   });
   $('#research-form').elements.ticker_news_enabled.addEventListener('change',()=>{$('#news-source-fields').hidden=!checked('#research-form','ticker_news_enabled');});
-  $('#preferences-form').addEventListener('submit',action(async()=>{const data=values('#preferences-form');for(const key of ['position_review_threshold_pct','sector_review_threshold_pct','max_searches','max_seconds','max_data_age_hours','retention_days']) data[key]=Number(data[key]);await save(data);}));
+  $('#preferences-form').addEventListener('submit',action(async()=>{const data=values('#preferences-form');for(const key of ['position_review_threshold_pct','sector_review_threshold_pct','max_searches','max_model_calls','max_tool_calls','max_seconds','max_data_age_hours','retention_days']) data[key]=Number(data[key]);await save(data);}));
   $('#profile-form').addEventListener('submit',action(async()=>{const data=values('#profile-form');let targets={};try{targets=data.allocation_targets.trim()?JSON.parse(data.allocation_targets):{};}catch{throw new Error('Other targets must be a JSON object, for example {"real_estate":10}.');}if(!targets||Array.isArray(targets)||typeof targets!=='object')throw new Error('Other targets must be a JSON object.');for(const name of ['stocks','bonds','cash']){const raw=data[`target_${name}`].trim();delete data[`target_${name}`];if(raw)targets[name]=Number(raw);}if(!Object.keys(targets).length||Object.values(targets).some(value=>!Number.isFinite(value)||value<0||value>100)||Object.values(targets).reduce((sum,value)=>sum+value,0)>100)throw new Error('Enter targets between 0% and 100% that total no more than 100%.');data.allocation_targets=targets;data.restrictions=data.restrictions.split('\n').map(s=>s.trim()).filter(Boolean);await save({investment_profile:data});}));
   $('#mail-provider').addEventListener('change',()=>setMailProvider());
   $('#email-form').addEventListener('submit',action(async()=>{

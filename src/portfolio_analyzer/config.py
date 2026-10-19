@@ -48,9 +48,10 @@ class Settings(BaseModel):
     sec_company_filings_enabled: bool = False
     ticker_news_enabled: bool = True
     news_feed_sources: list[str] = Field(default_factory=lambda: ["google_news", "nasdaq"])
-    alpha_vantage_enabled: bool = False
     sec_contact: str = ""
     max_searches: int = Field(default=30, ge=0, le=30)
+    max_model_calls: int = Field(default=8, ge=1, le=64)
+    max_tool_calls: int = Field(default=40, ge=0, le=200)
     max_seconds: int = Field(default=120, ge=1, le=600)
     max_data_age_hours: int = Field(default=72, ge=1, le=8760)
     benchmark: str = "SPY"
@@ -66,6 +67,8 @@ class Settings(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def default_sec_for_contact(cls, data):
+        if isinstance(data, dict):
+            data = {key: value for key, value in data.items() if key != "alpha_vantage_enabled"}
         if isinstance(data, dict) and "sec_company_filings_enabled" not in data and valid_sec_contact(data.get("sec_contact")):
             data = {**data, "sec_company_filings_enabled": True}
         return data

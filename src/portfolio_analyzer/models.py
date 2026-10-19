@@ -85,6 +85,8 @@ class AnalysisRequest(Contract):
     benchmark: str = Field(default="SPY", max_length=40)
     report_length: Literal["brief", "detailed"] = "brief"
     max_searches: int = Field(default=30, ge=0, le=30)
+    max_model_calls: int = Field(default=8, ge=1, le=64)
+    max_tool_calls: int = Field(default=40, ge=0, le=200)
     max_seconds: int = Field(default=120, ge=1, le=600)
     max_data_age_hours: int = Field(default=72, ge=1, le=8760)
     position_review_threshold_pct: float = Field(default=25, gt=0, le=100)
@@ -128,6 +130,11 @@ class Finding(Contract):
     uncertainty: str | None = Field(default=None, max_length=1000)
 
 
+class BriefingSummary(Contract):
+    text: str = Field(min_length=1, max_length=1600)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=30)
+
+
 class AnalysisResult(Contract):
     schema_version: Literal["1.0"] = "1.0"
     run_id: str = Field(default_factory=lambda: str(uuid4()))
@@ -137,6 +144,9 @@ class AnalysisResult(Contract):
     metrics: dict[str, Any] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
     findings: list[Finding] = Field(default_factory=list)
+    executive_summary: BriefingSummary | None = None
+    research_activity: list[dict[str, Any]] = Field(default_factory=list)
+    research_budget: dict[str, Any] = Field(default_factory=dict)
     sources: list[Evidence] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list)
@@ -144,5 +154,6 @@ class AnalysisResult(Contract):
 
 
 class ResearchNarrative(Contract):
+    executive_summary: BriefingSummary | None = None
     findings: list[Finding] = Field(default_factory=list, max_length=30)
     suggestions: list[str] = Field(default_factory=list, max_length=10)

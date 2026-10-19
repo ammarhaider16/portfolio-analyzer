@@ -9,11 +9,31 @@ def valid_sec_contact(value: str | None) -> bool:
 
 
 def source_outcome(status: str, reason: str = "") -> dict:
-    return {"status": status, "reason": reason, "tested_at": datetime.now(timezone.utc).isoformat()}
+    category = ""
+    if reason in {"HTTP 401", "HTTP 403"}:
+        category = "blocked"
+    elif "quota" in reason.lower() or reason == "HTTP 429":
+        category = "quota"
+    elif "subscription" in reason.lower():
+        category = "entitlement"
+    elif "configured" in reason.lower() or "key is invalid" in reason.lower() or "contact" in reason.lower():
+        category = "configuration"
+    elif "timed out" in reason.lower():
+        category = "timeout"
+    elif reason.startswith("HTTP "):
+        category = "http"
+    elif status == "failed":
+        category = "request"
+    return {"status": status, "reason": reason, "category": category, "tested_at": datetime.now(timezone.utc).isoformat()}
 
 
 def safe_source_error(error: Exception) -> str:
     """Do not expose URLs, response bodies, credentials, or arbitrary exception text."""
+    safe_reason = getattr(error, "safe_reason", None)
+    if safe_reason:
+        return safe_reason
+    if isinstance(error, TimeoutError):
+        return "Source request timed out"
     status = getattr(error, "status_code", None) or getattr(getattr(error, "response", None), "status_code", None)
     return f"HTTP {status}" if isinstance(status, int) else "Source request failed"
 

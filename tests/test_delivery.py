@@ -50,10 +50,48 @@ def test_embed_drops_page_title_but_keeps_plain_text_and_sections():
     # Email and plain-text delivery keep the page title regardless of embedding.
     assert default_plain == embed_plain
     assert default_plain.startswith("Betafolio briefing")
-    assert "Bottom line" in embed_html
+    assert "Briefing summary" in embed_html
+    assert "Research coverage" in embed_html
     assert "2 of 3 holdings valued" in embed_html
     assert "What to do next" not in embed_html
     assert "Data notes" not in embed_html
+
+
+def test_briefing_summary_distinguishes_conclusion_from_coverage():
+    report = {"coverage": {"summary": "Portfolio measures ready; sourced insights available"},
+              "executive_summary": {"text": "The fund changed its benchmark, affecting its exposure.",
+                                    "evidence_ids": ["s1"]}}
+    html, plain = render_report(report)
+    assert plain.index("The fund changed") < plain.index("Research coverage")
+    assert "Briefing summary" in html and "Bottom line" not in html
+
+
+def test_legacy_summary_uses_measured_observation_and_honest_gap():
+    report = {"metrics": {"weights_pct": {"AAPL": 32.55, "BND": 10}},
+              "coverage": {"summary": "Sources failed"}}
+    _, plain = render_report(report)
+    assert "AAPL represents 32.5%" in plain
+    assert "did not establish a sourced current-event conclusion" in plain
+    assert "No events" not in plain
+
+
+def test_percentage_view_does_not_leak_executive_summary_or_activity():
+    report = {"metrics": {"cash_weight_pct": 25},
+              "executive_summary": {"text": "Holding value $123456", "evidence_ids": []},
+              "research_activity": [{"query": "owner holding value $123456"}]}
+    html, plain = render_report(report, percent_only=True)
+    assert "123456" not in html + plain
+    assert "Briefing summary" not in plain
+
+
+def test_summary_citations_render_only_safe_known_sources():
+    report = {"executive_summary": {"text": "Supported development.", "evidence_ids": ["good", "bad", "missing"]},
+              "sources": [{"id": "good", "title": "Fund notice", "url": "https://example.org/notice"},
+                          {"id": "bad", "title": "Unsafe", "url": "javascript:alert(1)"}]}
+    html, plain = render_report(report)
+    assert 'href="https://example.org/notice"' in html
+    assert "Summary source: Fund notice" in plain
+    assert "javascript:" not in html + plain
 
 
 def test_report_lists_actionable_next_steps_for_coverage_issues():

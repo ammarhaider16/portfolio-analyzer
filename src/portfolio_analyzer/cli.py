@@ -97,8 +97,13 @@ async def diagnose(args, directory):
     if args.live:
         checks["live"] = {}
         deps = build_dependencies(settings, service.secrets)
+        from .providers import probe_research_sources
+        snapshot = service.store.snapshot()
+        position = snapshot.positions[0] if snapshot and snapshot.positions else None
+        checks["live"]["sources"] = await probe_research_sources(
+            deps.research, symbol=position.symbol if position else "AAPL",
+            name=position.instrument_name if position else None)
         for name, operation in (
-            ("search", lambda: deps.research.search("Federal Reserve latest monetary policy", max_results=1) if deps.research else None),
             ("model", lambda: deps.model.ainvoke("Respond with the word connected.") if deps.model else None),
         ):
             try:

@@ -33,7 +33,7 @@ from .service import (MODEL_PROVIDER_ALIASES, MODEL_PROVIDER_SLOTS, SECRET_ALIAS
 from .screenshot_import import DraftPosition
 
 MODEL_SECRET_SLOTS = set(MODEL_PROVIDER_SLOTS.values()) | {"model_api_key"}
-DEPLOYMENT_SECRETS = {"tavily_api_key", "smtp_password", "alpha_vantage_api_key"}
+DEPLOYMENT_SECRETS = {"tavily_api_key", "smtp_password"}
 
 
 def safe_error_reason(exc, secret=None):
@@ -59,7 +59,7 @@ def safe_error_reason(exc, secret=None):
 def secret_kind(name):
     if name == "model_api_key" or name in MODEL_SECRET_SLOTS:
         return "model"
-    if name in {"tavily_api_key", "alpha_vantage_api_key"}:
+    if name == "tavily_api_key":
         return "search"
     if name == "smtp_password":
         return "email"
@@ -304,7 +304,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             next_run = (await asyncio.to_thread(next_session_run, datetime.now(timezone.utc), settings.schedule.delay_minutes, settings.schedule.timezone)).isoformat()
         secrets = await asyncio.to_thread(secret_status, settings, service.secrets, server)
         storage = await asyncio.to_thread(service.secrets.storage_status)
-        legacy = ("model_api_key", "tavily_api_key", "smtp_password", "alpha_vantage_api_key")
+        legacy = ("model_api_key", "tavily_api_key", "smtp_password")
         return {"snapshot": snapshot.model_dump(mode="json") if snapshot else None,
                 "history": service.store.history(), "settings": settings.model_dump(mode="json"),
                 "prices": quotes["prices"], "prices_as_of": quotes["as_of"],
@@ -351,7 +351,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         tests = service.store.get("connection_tests", {})
         if current.model != updated.model or current.model_enabled != updated.model_enabled:
             tests.pop("model", None)
-        if any(getattr(current, field) != getattr(updated, field) for field in ("search_provider", "primary_feeds_enabled", "sec_contact", "alpha_vantage_enabled", "sec_company_filings_enabled", "ticker_news_enabled", "news_feed_sources")):
+        if any(getattr(current, field) != getattr(updated, field) for field in ("search_provider", "primary_feeds_enabled", "sec_contact", "sec_company_filings_enabled", "ticker_news_enabled", "news_feed_sources")):
             tests.pop("search", None)
         service.store.set("connection_tests", tests)
         save_settings(directory, updated)
@@ -477,10 +477,11 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                     enabled = settings.search_provider != "disabled"
                     configured = {
                         "search": enabled and settings.search_provider != "disabled",
-                        "official_feeds": enabled and settings.primary_feeds_enabled,
+                        "fed": enabled and settings.primary_feeds_enabled,
                         "sec_filings": enabled and settings.sec_company_filings_enabled,
-                        "ticker_news": enabled and settings.ticker_news_enabled,
-                        "alpha_vantage": enabled and settings.alpha_vantage_enabled,
+                        "google_news": enabled and settings.ticker_news_enabled and "google_news" in settings.news_feed_sources,
+                        "nasdaq": enabled and settings.ticker_news_enabled and "nasdaq" in settings.news_feed_sources,
+                        "bing_news": enabled and settings.ticker_news_enabled and "bing_news" in settings.news_feed_sources,
                     }
                     for source, active in configured.items():
                         if source not in outcomes:

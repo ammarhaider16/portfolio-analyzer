@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from .metrics import calculate_metrics
-from .models import AnalysisRequest, AnalysisResult, Finding, InvestmentProfile, Position, PortfolioSnapshot
+from .models import AnalysisRequest, AnalysisResult, BriefingSummary, Finding, InvestmentProfile, Position, PortfolioSnapshot
 from .news import cluster_stories
 
 
@@ -110,6 +110,14 @@ async def _resolve_identities(snapshot: PortfolioSnapshot, market_data, budget_s
 
 
 async def _search_events(provider, query: str, max_results: int, cutoff, symbol: str | None = None, name: str | None = None):
+    from .providers import CompositeResearchProvider, source_network_slot
+    if isinstance(provider, CompositeResearchProvider):
+        return await _dispatch_search_events(provider, query, max_results, cutoff, symbol, name)
+    async with source_network_slot():
+        return await _dispatch_search_events(provider, query, max_results, cutoff, symbol, name)
+
+
+async def _dispatch_search_events(provider, query, max_results, cutoff, symbol=None, name=None):
     # Feed providers can address a symbol directly; the symbolic query stays the fallback.
     if symbol and hasattr(provider, "search_symbol_candidates"):
         return await provider.search_symbol_candidates(symbol, name, max_results=max_results, reporting_cutoff=cutoff)
@@ -204,14 +212,25 @@ class EngineDependencies:
     model: Any = None
     hard_search_limit: int = 30
     hard_seconds_limit: int = 600
+    hard_model_limit: int = 64
+    hard_tool_limit: int = 200
+    activity_sink: Any = None
     semaphore: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(2), repr=False)
 
 
 async def analyze_portfolio(request: AnalysisRequest, dependencies: EngineDependencies | None = None) -> AnalysisResult:
     """Analyze one isolated request. Cancellation propagates to the caller."""
+    from .providers import source_network_scope
+    with source_network_scope(limit=4):
+        return await _analyze_with_source_limit(request, dependencies)
+
+
+async def _analyze_with_source_limit(request, dependencies):
     request = AnalysisRequest.model_validate(request)
     dependencies = dependencies or EngineDependencies()
-    request = request.model_copy(update={"max_searches": min(request.max_searches, max(0, dependencies.hard_search_limit)), "max_seconds": min(request.max_seconds, max(1, dependencies.hard_seconds_limit))})
+    request = request.model_copy(update={"max_searches": min(request.max_searches, max(0, dependencies.hard_search_limit)), "max_seconds": min(request.max_seconds, max(1, dependencies.hard_seconds_limit)),
+                                         "max_model_calls": min(request.max_model_calls, max(1, dependencies.hard_model_limit)),
+                                         "max_tool_calls": min(request.max_tool_calls, max(0, dependencies.hard_tool_limit))})
     started = asyncio.get_running_loop().time()
     try:
         async with asyncio.timeout(request.max_seconds):
@@ -229,6 +248,12 @@ async def analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepend
 
 async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDependencies, timeout_seconds: float) -> AnalysisResult:
     result = AnalysisResult(snapshot_as_of=request.snapshot.as_of)
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    from .research_runtime import ResearchRuntime
+    runtime = ResearchRuntime(request, result.sources, research=dependencies.research,
+                              market_data=dependencies.market_data, deadline=deadline,
+                              activity=result.research_activity, budget=result.research_budget,
+                              activity_sink=dependencies.activity_sink)
     snapshot = request.snapshot.model_copy(deep=True)
     result.metrics = calculate_metrics(snapshot)
     if snapshot.source == "demonstration":
@@ -343,10 +368,12 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                 research_failed = False
                 from .providers import supports_market_news
                 broad_capable = supports_market_news(dependencies.research)
-                broad_search = request.max_searches >= 3 and len(focus_symbols) >= 2 and request.max_searches > len(focus_symbols) and broad_capable
-                if len(focus_symbols) < 2:
-                    result.metrics["setup_news_reason"] = "insufficient_holdings"
-                elif not broad_capable:
+                # The initial pass establishes coverage, leaving discovery decisions to the analyst.
+                initial_limit = min(request.max_searches, 8) if dependencies.model is not None else request.max_searches
+                if dependencies.model is not None:
+                    initial_limit = min(initial_limit, max(0, request.max_searches // 3))
+                broad_search = initial_limit >= 3 and initial_limit > len(focus_symbols) and broad_capable
+                if not broad_capable:
                     result.metrics["setup_news_reason"] = "unsupported_provider"
                 elif not broad_search:
                     result.metrics["setup_news_reason"] = "budget_exhausted"
@@ -357,8 +384,13 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                     focus = "latest earnings filings material news fund holdings changes"
                     query = f'"{name}" {symbol} {focus}' if name else f'"{symbol}" ticker {focus}'
                     try:
-                        candidates = await _search_events(dependencies.research, query, 12, request.reporting_cutoff, symbol=symbol, name=name)
+                        runtime._claim(query=True)
+                        await runtime.emit("initial_asset_news", "started", query=query, symbol=symbol)
+                        candidates = await asyncio.wait_for(_search_events(dependencies.research, query, 12, request.reporting_cutoff, symbol=symbol, name=name),
+                                                            timeout=min(8, max(0.001, runtime.remaining() - runtime.reserve)))
+                        await runtime.emit("initial_asset_news", "passed" if candidates else "empty", symbol=symbol, result_count=len(candidates))
                     except Exception:
+                        await runtime.emit("initial_asset_news", "failed", symbol=symbol)
                         return symbol, [], False, True
                     matched = []
                     failed_retrieval = False
@@ -372,7 +404,7 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                         if not _recent_event(source, reference) or not _entity_matches(source, position):
                             continue
                         # Headline feeds carry only a dated headline and link; never treat them as article text.
-                        if hasattr(dependencies.research, "retrieve") and source.content_type != "news_feed":
+                        if dependencies.model is None and hasattr(dependencies.research, "retrieve") and source.content_type != "news_feed":
                             try:
                                 source = await dependencies.research.retrieve(source)
                             except Exception:
@@ -381,7 +413,7 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                             matched.append(source)
                     return symbol, matched, failed_retrieval, False
 
-                selected = focus_symbols[:request.max_searches - int(broad_search)]
+                selected = focus_symbols[:initial_limit - int(broad_search)]
                 for start in range(0, len(selected), 4):
                     batch = await asyncio.gather(*(search_position(symbol) for symbol in selected[start:start + 4]))
                     for symbol, matched, failed_retrieval, failed_search in batch:
@@ -425,14 +457,18 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                     result.metrics["setup_news_reason"] = "source_limit"
                 if broad_search and len(result.sources) < source_limit:
                     try:
-                        broad = await _search_events(dependencies.research, "recent Federal Reserve economic policy broad stock market material developments", 3, request.reporting_cutoff)
+                        runtime._claim(query=True)
+                        await runtime.emit("initial_market_news", "started")
+                        broad = await asyncio.wait_for(_search_events(dependencies.research, "recent Federal Reserve economic policy broad stock market material developments", 3, request.reporting_cutoff),
+                                                       timeout=min(8, max(0.001, runtime.remaining() - runtime.reserve)))
+                        await runtime.emit("initial_market_news", "passed" if broad else "empty", result_count=len(broad))
                         reference = request.reporting_cutoff or datetime.now(timezone.utc)
                         for source in broad[:2]:
                             if source.url in seen or source.published_at and source.published_at > reference or request.reporting_cutoff and source.published_at is None:
                                 continue
                             if not _macro_matches(source) or not _recent_event(source, reference):
                                 continue
-                            if hasattr(dependencies.research, "retrieve") and source.content_type != "news_feed":
+                            if dependencies.model is None and hasattr(dependencies.research, "retrieve") and source.content_type != "news_feed":
                                 try:
                                     source = await dependencies.research.retrieve(source)
                                 except Exception:
@@ -479,21 +515,89 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
                 try:
                     from .agent import generate_narrative
                     safe_request = request.model_copy(update={"snapshot": snapshot, "include_suggestions": bool(request.include_suggestions and profile_complete), "investment_profile": profile.model_dump() if profile else None})
-                    narrative = await generate_narrative(dependencies.model, safe_request, result.metrics, result.sources)
+                    narrative = await generate_narrative(dependencies.model, safe_request, result.metrics, result.sources,
+                                                         research=dependencies.research, market_data=dependencies.market_data,
+                                                         activity_sink=dependencies.activity_sink, deadline=deadline,
+                                                         activity=result.research_activity, budget=result.research_budget)
+                    # Refresh presentation metadata from all evidence gathered by the analyst.
+                    current_reference = request.reporting_cutoff or datetime.now(timezone.utc)
+                    current_sources = [source for source in result.sources if source.published_at is not None
+                                       and source.published_at <= current_reference and _recent_event(source, current_reference)]
+                    broad_source_ids = {source.id for source in current_sources if _macro_matches(source)
+                                        and source.content_type in {"official_feed", "retrieved_page", "news_feed"}}
+                    result.metrics["setup_news_source_ids"] = list(broad_source_ids)
+                    if broad_source_ids:
+                        result.metrics["setup_news_status"] = "verified"
+                        result.metrics["setup_news_reason"] = None
+                    elif any(_macro_matches(source) for source in current_sources):
+                        result.metrics["setup_news_status"] = "discovery_only"
+                    elif result.metrics["setup_news_status"] == "verified":
+                        result.metrics["setup_news_status"] = "no_verified_update"
+                    for symbol, entry in news_by_symbol.items():
+                        attached = [source for source in current_sources if _entity_matches(source, positions[symbol])]
+                        if attached:
+                            entry["source_ids"] = [source.id for source in attached]
+                            stories = cluster_stories(attached, symbol)
+                            entry["stories"], entry["additional_stories"] = stories[:2], stories[2:]
+                            full = any(source.content_type in {"retrieved_page", "official_feed"} for source in attached)
+                            headline = any(source.content_type == "news_feed" for source in attached)
+                            entry["status"] = "verified" if full or headline else "discovery_only"
+                            entry["evidence_grade"] = "full" if full else "headline" if headline else None
+                        else:
+                            last_search = next((event for event in reversed(result.research_activity)
+                                                if event.get("symbol") == symbol and event.get("tool") == "search_asset_news"
+                                                and event.get("status") in {"passed", "empty", "failed"}), None)
+                            if last_search:
+                                entry["status"] = "search_failed" if last_search["status"] == "failed" else "no_verified_update"
                     valid_ids = {s.id for s in result.sources if s.content_type in {"retrieved_page", "official_feed", "news_feed"}}
                     evidence_by_id = {source.id: source for source in result.sources}
                     for finding in narrative.findings[:4 if request.report_length == "brief" else 12]:
                         cited = [evidence_by_id[identifier] for identifier in finding.evidence_ids if identifier in valid_ids]
+                        reference = request.reporting_cutoff or datetime.now(timezone.utc)
+                        valid_sources = all(_recent_event(source, reference) and
+                                            (source.published_at is None and not request.reporting_cutoff or
+                                             source.published_at is not None and source.published_at <= reference)
+                                            for source in cited)
                         valid_entity = all(symbol in positions and any(_entity_matches(source, positions[symbol]) for source in cited)
                                            for symbol in finding.affected_symbols)
                         valid_scope = bool(finding.affected_symbols) or bool(cited) and all(source.id in broad_source_ids for source in cited) and bool(finding.portfolio_relevance)
                         valid_date = finding.event_date is None or finding.event_date <= (request.reporting_cutoff or result.created_at).date()
-                        if cited and len(cited) == len(finding.evidence_ids) and valid_entity and valid_scope and valid_date:
+                        if cited and len(cited) == len(finding.evidence_ids) and valid_entity and valid_scope and valid_date and valid_sources:
+                            if all(source.content_type == "news_feed" for source in cited):
+                                # A headline link verifies only the attributed headline,
+                                # never the model's invented article details or causality.
+                                finding = finding.model_copy(update={
+                                    "title": "Reported news for " + ", ".join(finding.affected_symbols) if finding.affected_symbols else "Reported market headline",
+                                    "detail": " ".join(f"{source.publisher} reported: {source.title}." for source in cited[:2]),
+                                    "event_date": None,
+                                    "portfolio_relevance": ("Interpretation: " + finding.portfolio_relevance) if finding.portfolio_relevance else None,
+                                    "uncertainty": "Headline-only evidence; article details, figures and causes have not been verified.",
+                                })
                             result.findings.append(finding)
                         else:
                             result.warnings.append("A generated finding with invalid evidence, entity, or date references was withheld.")
                     if safe_request.include_suggestions:
                         result.suggestions = narrative.suggestions
+                    if narrative.executive_summary:
+                        accepted_ids = {identifier for finding in result.findings for identifier in finding.evidence_ids}
+                        summary_ids = narrative.executive_summary.evidence_ids
+                        if summary_ids and all(identifier in accepted_ids for identifier in summary_ids):
+                            summary_sources = [evidence_by_id[identifier] for identifier in summary_ids]
+                            if all(source.content_type == "news_feed" for source in summary_sources):
+                                symbols = sorted({symbol for finding in result.findings
+                                                  if set(summary_ids).intersection(finding.evidence_ids)
+                                                  for symbol in finding.affected_symbols})
+                                text = " ".join(f"{source.publisher} reported: {source.title}." for source in summary_sources[:2])
+                                if symbols:
+                                    text += " Relevant holdings: " + ", ".join(symbols) + "."
+                                text += " Article details remain unverified."
+                                result.executive_summary = BriefingSummary(text=text[:1600], evidence_ids=summary_ids)
+                            else:
+                                result.executive_summary = narrative.executive_summary
+                        else:
+                            result.warnings.append("A generated summary with unsupported evidence references was withheld.")
+                    if result.research_budget.get("exhausted"):
+                        result.warnings.append("Research budget exhausted; completed evidence is shown without an unsupported conclusion.")
                 except Exception:
                     result.warnings.append("Model analysis unavailable or invalid; deterministic metrics remain available.")
             else:
@@ -506,9 +610,12 @@ async def _analyze_portfolio(request: AnalysisRequest, dependencies: EngineDepen
         result.coverage = _coverage(result, request, dependencies)
         return result
     # Informational calculation notes do not by themselves indicate a degraded run.
+    result.coverage = _coverage(result, request, dependencies)
     degraded = (dependencies.model is None or dependencies.research is None or not any(source.content_type in {"retrieved_page", "official_feed", "news_feed"} for source in result.sources)
+                or any(item.get("status") in {"failed", "skipped"} for item in result.coverage.get("source_outcomes", {}).values())
+                or any(entry.get("status") in {"not_checked", "search_failed"} for entry in result.metrics.get("position_news", []))
+                or any(event.get("status") in {"budget_exhausted", "cancelled"} for event in result.research_activity)
                 or not result.metrics["coverage_complete"] or any(
                     text in warning for warning in result.warnings for text in ("unavailable", "exceeds", "future", "exhausted", "withheld", "invalid")))
     result.status = "partial" if degraded else "success"
-    result.coverage = _coverage(result, request, dependencies)
     return result
