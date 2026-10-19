@@ -9,7 +9,7 @@ from portfolio_analyzer.models import AnalysisResult, Evidence, Finding
 
 
 def result():
-    return AnalysisResult(snapshot_as_of=datetime.now(timezone.utc), metrics={"total_value": 123456, "cash_weight": 0.25}, findings=[Finding(title="<script>bad</script>", detail="Value $123456")], sources=[Evidence(id="1", url="javascript:alert(1)", title="bad", publisher="unknown"), Evidence(id="2", url="https://example.org/?x=1&y=2", title="Evidence", publisher="Example")])
+    return AnalysisResult(snapshot_as_of=datetime.now(timezone.utc), metrics={"total_value": 123456, "cash_weight": 0.25}, findings=[Finding(title="<script>bad</script>", detail="Value $123456", evidence_ids=["2"])], sources=[Evidence(id="1", url="javascript:alert(1)", title="bad", publisher="unknown"), Evidence(id="2", url="https://example.org/?x=1&y=2", title="Evidence", publisher="Example")])
 
 
 def config(**kwargs):
@@ -34,9 +34,10 @@ def test_professional_report_has_accessible_metrics_and_risk_sections():
     assert '<th scope="row"' in html and "<caption" in html
     assert "$123,456.78" in html and "$123,456.78" in plain
     assert "25.00%" in html and "25.00%" in plain
-    for title in ("Portfolio at a glance", "Research findings", "Risks to review", "Coverage and freshness", "Evidence and sources"):
+    for title in ("What matters now", "Portfolio at a glance", "Limits of this briefing"):
         assert title in html and title in plain
     assert "cash_weight_pct" not in html
+    assert "Status: " not in plain
 
 
 def test_percentage_view_omits_amounts_and_narrative():

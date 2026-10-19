@@ -59,7 +59,7 @@ Credentials belong to the injected providers, never to request JSON. A missing m
 
 ## Contracts and evidence
 
-The generated schemas are [AnalysisRequest](schemas/analysis-request.json) and [AnalysisResult](schemas/analysis-result.json). The result has `schema_version: "1.0"`, a run identifier, timestamps, metrics, findings, sources, warnings, optional suggestions, and a status of `success`, `partial`, or `failed`. Consumers should validate the schema version and examine warnings and freshness before using findings.
+The generated schemas are [AnalysisRequest](schemas/analysis-request.json) and [AnalysisResult](schemas/analysis-result.json). The result has `schema_version: "1.0"`, a run identifier, timestamps, metrics, structured `coverage`, findings, sources, warnings, optional suggestions, and a status of `success`, `partial`, or `failed`. `coverage` gives valued/total holding counts, excluded symbols, research and narrative availability, and prioritized issues with actions. Consumers should validate the schema version and examine coverage and freshness before using findings.
 
 `Evidence` carries an ID, URL, title, publisher, retrieval timestamp, optional publication timestamp, excerpt, and content type. The default content type, `search_excerpt`, means discovery evidence. `retrieved_page` and `official_feed` identify retrieved source content. Generated market findings require valid citations to these retrieved types; discovery snippets alone cannot support accepted findings. Source retrieval permits public HTTPS destinations, pins the verified DNS destination, validates TLS, rejects redirects, limits response size, and blocks private or reserved addresses.
 
@@ -73,7 +73,7 @@ Suggestions are opt-in for each request. The investment profile requires nonblan
 
 ## Budgets, cancellation, and deployment boundaries
 
-`max_searches` bounds logical search calls, not individual HTTP requests inside a provider. Requests allow at most 30 searches and 600 seconds. `EngineDependencies.hard_search_limit` and `hard_seconds_limit` can impose stricter caller-controlled ceilings; requesting larger limits cannot override them. Source collection stops at 12 unique URLs and three results per search. Official feeds cache public responses for five minutes, and identified SEC access is paced. Narrative validation failures are not automatically retried by the agent.
+`max_searches` bounds logical search calls, not individual HTTP requests inside a provider. Requests allow at most 30 searches and 600 seconds; the default search ceiling is 30. `EngineDependencies.hard_search_limit` and `hard_seconds_limit` can impose stricter caller-controlled ceilings; requesting larger limits cannot override them. The engine checks up to four holdings concurrently, takes at most two matching sources per holding, and caps the total at 62 URLs. Broad market/policy search uses a remaining search slot. All positions receive a news-coverage state, including `not_checked` when the search budget is insufficient. Detailed reports list price context and news status for every saved holding, while the synthesis model still sees only 30 holdings and 12 source excerpts. Official feeds cache public responses for five minutes, and identified SEC access is paced. Narrative validation failures are not automatically retried by the agent.
 
 The elapsed-time budget includes waiting for the shared concurrency semaphore. A budget timeout returns a partial report with completed calculations. Cancellation propagates as `asyncio.CancelledError`; it does not produce a misleading success. A synchronous network operation already dispatched to a worker thread may finish after cancellation, subject to its own timeout, but additional symbol requests stop. Hosts must enforce their own authenticated request quotas and reuse dependency limits when exposing the library as a service.
 
@@ -88,6 +88,7 @@ The application exposes the same research contract through an asynchronous run A
 | `POST /api/runs` with `{"analysis": <AnalysisRequest>, "send_email": false}` | HTTP 202 with `run_id`, queued status, and relative `result_url` |
 | `GET /api/runs/{run_id}` | Persisted run record; `result` is `null` while incomplete, then an `AnalysisResult` object |
 | `POST /api/runs/{run_id}/cancel` | Cancels an active run; the application records cancellation as a failed run without delivery |
+| `POST /api/portfolio/enrich` with up to 30 draft positions | Read-only metadata and missing daily-close price proposals; no quantities are inferred or saved |
 | `GET /api/schema/request` | Current `AnalysisRequest` JSON schema |
 | `GET /api/schema/result` | Current `AnalysisResult` JSON schema |
 | `GET /api/schema/submission` | Current HTTP wrapper JSON schema |
@@ -122,6 +123,6 @@ Keep the persisted run status separate from `result.status`: a completed executi
 
 ## Portfolio maintenance and screenshots
 
-The owner can preview CSV with `POST /api/import` and save a reviewed snapshot with `POST /api/portfolio` using `{"snapshot": <PortfolioSnapshot>}`. CASH/USD/cash-type rows normalize into the cash balance. Saving replaces the current portfolio, and scheduled jobs read it at execution time. Updating prices for research never changes stored quantities/cash. The supplied `as_of` remains the position timestamp and is shown in reports even when prices are refreshed.
+The owner can preview CSV with `POST /api/import` and save a reviewed snapshot with `POST /api/portfolio` using `{"snapshot": <PortfolioSnapshot>}`. A CSV can contain only ticker/symbol and price per share; its preview then contains null quantities that the owner must fill before saving. Instrument metadata is resolved at analysis time where reliable and remains unknown where ambiguous. CASH/USD/cash-type rows normalize into the cash balance. Saving replaces the current portfolio, and scheduled jobs read it at execution time. Updating prices for research never changes stored quantities/cash. The supplied `as_of` remains the position timestamp and is shown in reports even when prices are refreshed.
 
 `POST /api/import/image` accepts `{"image_base64": "...", "content_type": "image/png", "as_of": "<timezone-aware ISO date>"}` and returns an **unsaved** draft. JPEG and WebP are also accepted. Unknown quantities/cash are null; the dashboard requires correction before a separate save request. Images are decoded with size/pixel/type checks, metadata is removed, and pixels are sent to a configured vision-capable model. Original screenshots are not written to disk. Research bearer tokens cannot use either portfolio mutation or image extraction endpoints.

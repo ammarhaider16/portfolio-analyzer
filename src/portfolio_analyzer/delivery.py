@@ -121,76 +121,178 @@ def _metric_rows(value: Any, path: tuple[str, ...] = ()) -> list[tuple[str, str]
 
 
 def render_report(result: Any, percent_only: bool = False) -> tuple[str, str]:
-    """Return escaped standalone HTML and equivalent plain text, without remote assets."""
+    """Render a short decision-focused briefing; raw metrics stay in the JSON API."""
     data = _data(result)
-    heading = "Portfolio briefing"
-    as_of = str(data.get('snapshot_as_of', 'Unknown'))
-    status = str(data.get('status', 'unknown')).capitalize()
-    lines = [heading, f"As of: {as_of}", f"Status: {status}"]
-    body = f'<p style="color:#526577">As of {escape(as_of)}<br>Status: {escape(status)}</p>'
-
-    def paragraph(text: str) -> None:
-        nonlocal body
-        lines.append(text)
-        body += f'<p style="line-height:1.6">{escape(text)}</p>'
+    metrics = data.get("metrics", {})
+    coverage = data.get("coverage") or {}
+    as_of = str(data.get("snapshot_as_of", "Unknown"))
+    lines = ["Betafolio briefing", f"Holdings as of {as_of}"]
+    body = f'<p class="date">Holdings as of {escape(as_of)}</p>'
 
     def section(title: str) -> None:
         nonlocal body
         lines.append(title)
-        body += f'<h2 style="font-size:20px;margin-top:28px;color:#173f55">{escape(title)}</h2>'
+        body += f'<h2>{escape(title)}</h2>'
 
-    metrics = data.get("metrics", {})
-    if percent_only:
-        metrics = _percent_metrics(metrics)
-        paragraph("Percentage-only view. Narrative and sources are omitted to protect portfolio amounts.")
-        if data.get("warnings"):
-            paragraph("Coverage or freshness limitations apply. Review the dashboard before relying on these figures.")
-    section("Portfolio at a glance")
-    rows = _metric_rows(metrics)
-    if rows:
-        body += '<table style="border-collapse:collapse;width:100%;font-size:14px"><caption style="text-align:left;padding:0 0 12px;color:#526577">Calculated portfolio metrics</caption><thead><tr><th scope="col" style="text-align:left;padding:10px;background:#edf4f6">Measure</th><th scope="col" style="text-align:right;padding:10px;background:#edf4f6">Value</th></tr></thead><tbody>'
+    def paragraph(value: str) -> None:
+        nonlocal body
+        lines.append(value)
+        body += f'<p>{escape(value)}</p>'
+
+    def table(rows: list[tuple[str, str]]) -> None:
+        nonlocal body
+        body += '<table><caption>Portfolio measures</caption><tbody>'
         for label, value in rows:
             lines.append(f"{label}: {value}")
-            body += f'<tr><th scope="row" style="text-align:left;font-weight:normal;padding:10px;border-bottom:1px solid #dce5ea">{escape(label)}</th><td style="text-align:right;padding:10px;border-bottom:1px solid #dce5ea">{escape(value)}</td></tr>'
+            body += f'<tr><th scope="row">{escape(label)}</th><td>{escape(value)}</td></tr>'
         body += '</tbody></table>'
+
+    if percent_only:
+        section("Portfolio percentages")
+        paragraph("Percentage-only view. Narrative and sources are omitted to protect portfolio amounts.")
+        rows = _metric_rows(_percent_metrics(metrics))
+        if rows:
+            table(rows)
+        if data.get("warnings"):
+            paragraph("Coverage or freshness limitations apply. Review the dashboard before relying on these figures.")
     else:
-        paragraph("No calculated metrics are available for this report.")
-    if not percent_only:
+        if coverage.get("summary"):
+            paragraph(str(coverage["summary"]))
         findings = [_data(item) for item in data.get("findings", [])]
-        for title, selected in (("Research findings", [item for item in findings if "risk" not in str(item.get("kind", "")).lower()]), ("Risks to review", [item for item in findings if "risk" in str(item.get("kind", "")).lower()])):
-            if selected:
-                section(title)
-                for item in selected:
-                    finding_title = str(item.get("title", "Finding"))
-                    lines.append(finding_title)
-                    body += f'<h3 style="font-size:16px;margin-bottom:6px">{escape(finding_title)}</h3>'
-                    paragraph(str(item.get("detail", "")))
-                    if item.get("evidence_ids"):
-                        paragraph("Evidence: " + ", ".join(map(str, item["evidence_ids"])))
+        substantive = [item for item in findings if item.get("title") != "Portfolio overview"]
+        substantive.sort(key=lambda item: (not bool(item.get("evidence_ids")), str(item.get("kind", "")) != "risk"))
+        selected = substantive[:4]
+        source_map = {source["id"]: source for entry in data.get("sources", []) if (source := _data(entry)).get("id")}
+        if selected:
+            section("What matters now")
+            for item in selected:
+                title, detail = str(item.get("title", "Finding")), str(item.get("detail", ""))
+                lines.extend((title, detail))
+                body += f'<article class="finding"><h3>{escape(title)}</h3><p>{escape(detail)}</p>'
+                context = []
+                if item.get("event_date"):
+                    context.append(f"Event date: {item['event_date']}")
+                if item.get("affected_symbols"):
+                    context.append("Affected: " + ", ".join(item["affected_symbols"]))
+                if item.get("portfolio_relevance"):
+                    context.append(str(item["portfolio_relevance"]))
+                if item.get("uncertainty"):
+                    context.append("Limit: " + str(item["uncertainty"]))
+                for note in context:
+                    lines.append(note)
+                    body += f'<p class="finding-context">{escape(note)}</p>'
+                for source_id in item.get("evidence_ids", []):
+                    source = source_map.get(source_id)
+                    if source and _safe_url(str(source.get("url", ""))):
+                        url = str(source["url"])
+                        label = str(source.get("title") or source.get("publisher") or "Source")
+                        lines.append(f"Source: {label}: {url}")
+                        body += f'<a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a>'
+                body += '</article>'
+        else:
+            section("What matters now")
+            paragraph("No supported portfolio insight is available for this run. Review the portfolio measures and data limitations below.")
+        position_news = coverage.get("position_news") or metrics.get("position_news", [])
+        if position_news:
+            section("News affecting your holdings")
+            details = {item["symbol"]: item for item in metrics.get("position_details", [])}
+            detailed = data.get("report_length") == "detailed" or metrics.get("report_length") == "detailed"
+            entries = position_news if detailed else [item for item in position_news if item.get("status") == "verified"]
+            for item in entries:
+                symbol = item["symbol"]
+                detail = details.get(symbol, {})
+                if detailed:
+                    context = [f"price ${detail['price']}" if detail.get("price") is not None else "price unavailable",
+                               f"previous close ${detail['previous_close']}" if detail.get("previous_close") is not None else "previous close unavailable",
+                               detail.get("asset_type") or "type unknown"]
+                    if detail.get("sector"):
+                        context.append(f"sector {detail['sector']}")
+                    quote_date = metrics.get("market_data_as_of", {}).get(symbol, {}).get("trading_date")
+                    if quote_date:
+                        context.append(f"closing price dated {quote_date}")
+                    try:
+                        price, previous = float(detail["price"]), float(detail["previous_close"])
+                        if previous > 0:
+                            context.append(f"change from previous close {(price / previous - 1) * 100:+.2f}%")
+                    except (TypeError, ValueError, KeyError):
+                        pass
+                    paragraph(f"{symbol}: {', '.join(context)}.")
+                linked = False
+                for source_id in item.get("source_ids", []):
+                    source = source_map.get(source_id)
+                    if not source or source.get("content_type") not in {"retrieved_page", "official_feed"} or not _safe_url(str(source.get("url", ""))):
+                        continue
+                    date = str(source.get("published_at") or "date unavailable")[:10]
+                    label = str(source.get("title") or source.get("publisher") or "Source")
+                    lines.append(f"{symbol}: {label} ({date}): {source['url']}")
+                    body += f'<p><strong>{escape(symbol)}</strong>: <a href="{escape(source["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a> <small>{escape(date)}</small></p>'
+                    linked = True
+                if detailed and not linked:
+                    paragraph(f"{symbol}: no verified recent position news found" if item.get("status") != "not_checked" else f"{symbol}: news was not checked in this run")
+            quiet = [item["symbol"] for item in position_news if item.get("status") != "verified"]
+            if not detailed and quiet:
+                paragraph(f"No verified recent position news for {', '.join(quiet[:12])}{' and others' if len(quiet) > 12 else ''}. Check coverage notes for search limits and connection status.")
+            section("Market and policy developments")
+            setup_ids = metrics.get("setup_news_source_ids", [])
+            if setup_ids:
+                paragraph("These developments may matter to portfolio exposure; the source alone does not establish a price effect.")
+            for source_id in setup_ids:
+                source = source_map.get(source_id)
+                if source and _safe_url(str(source.get("url", ""))):
+                    label = str(source.get("title") or "Source")
+                    lines.append(f"{label}: {source['url']}")
+                    body += f'<p><a href="{escape(source["url"], quote=True)}" target="_blank" rel="noopener noreferrer">{escape(label)}</a></p>'
+            if not setup_ids:
+                status = metrics.get("setup_news_status")
+                paragraph({"unavailable": "Market and policy news search was unavailable for this run.",
+                           "not_checked": "Market and policy news was not checked within this run's search limit.",
+                           "search_failed": "Market and policy news search failed for this run."}.get(
+                               status, "No verified recent market or policy development was found for this run."))
+        rows = []
+        missing = coverage.get("missing_price_symbols") or metrics.get("missing_prices", [])
+        unsupported = coverage.get("unsupported_symbols") or metrics.get("unsupported", [])
+        excluded = list(dict.fromkeys([*missing, *unsupported]))
+        for key, label in (("known_value", "Known valued assets"), ("cash_weight_pct", "Cash allocation of valued assets"),
+                           ("largest_position_pct", "Largest valued holding"), ("total_positions", "Holdings")):
+            if key == "largest_position_pct" and not metrics.get("total_positions"):
+                continue
+            if key in metrics and metrics[key] is not None:
+                try:
+                    number = float(metrics[key])
+                    value = f"${number:,.2f}" if key == "known_value" else (f"{number:.2f}%" if key.endswith("pct") else str(int(number)))
+                    if excluded and key in {"known_value", "cash_weight_pct", "largest_position_pct"}:
+                        value += f"; {', '.join(excluded[:5])} excluded"
+                    rows.append((label, value))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        if rows:
+            section("Portfolio at a glance")
+            table(rows)
         if data.get("suggestions"):
             section("Possible adjustments")
-            for suggestion in data["suggestions"]:
+            for suggestion in data["suggestions"][:4]:
                 paragraph(str(suggestion))
-        if data.get("warnings"):
-            section("Coverage and freshness")
-            for warning in data["warnings"]:
-                paragraph(str(warning))
+        issues = [str(item.get("message", "")) for item in coverage.get("issues", []) if item.get("message")]
+        warnings = list(dict.fromkeys(str(warning) for warning in data.get("warnings", [])))
+        actionable = issues if coverage else [warning for warning in warnings if any(word in warning.lower() for word in ("unpriced", "unsupported", "stale", "unavailable", "disabled", "identity", "research coverage"))]
+        if actionable:
+            section("Limits of this briefing")
+            for warning in actionable[:4]:
+                paragraph(warning)
         if data.get("error"):
             paragraph("Analysis could not be completed. Check the dashboard for recovery steps.")
-    if not percent_only:
-        sources_started = False
-        for source in data.get("sources", []):
-            source = _data(source)
-            url = str(source.get("url", ""))
-            if _safe_url(url):
-                if not sources_started:
-                    section("Evidence and sources")
-                    sources_started = True
-                title = str(source.get("title", "Source"))
-                description = f"[{source.get('id', '')}] {title} — {source.get('publisher', 'Source')}"
-                lines.append(f"{description}: {url}")
-                body += f'<p style="line-height:1.6"><a style="color:#126181" href="{escape(url, quote=True)}">{escape(description)}</a></p>'
-    html = f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{heading}</title></head><body style="font-family:Arial,sans-serif;margin:0;padding:24px;background:#f3f6f8;color:#172b3a"><main style="max-width:760px;margin:auto;background:#ffffff;padding:28px;border-top:5px solid #146575"><p style="font-size:12px;letter-spacing:2px;color:#146575">PORTFOLIO RESEARCH</p><h1 style="font-size:30px;margin-bottom:12px">{heading}</h1>{body}</main></body></html>'
+
+    style = ('body{font:16px/1.55 system-ui,sans-serif;color:#182629;background:#f4f6f3;margin:0;padding:20px}'
+             'main{max-width:760px;margin:auto;background:white;padding:clamp(20px,5vw,42px)}'
+             'h1{font-size:2rem;line-height:1.15;margin:.2em 0}h2{font-size:1.2rem;margin:2em 0 .6em}'
+             'h3{font-size:1rem;margin:0 0 .4em}.date,caption{color:#536366}p{margin:.4em 0 1em}'
+             '.finding{border-top:1px solid #cbd5d0;padding:1em 0}.finding a{display:inline-block;margin:.2em .7em .3em 0}'
+             '.finding-context{font-size:.9rem;color:#536366}'
+             'table{border-collapse:collapse;width:100%}caption{text-align:left}th,td{padding:.55em 0;border-bottom:1px solid #dbe2df}'
+             'th{text-align:left;font-weight:500}td{text-align:right;font-variant-numeric:tabular-nums}'
+             'a{color:#155c64}a:focus-visible{outline:3px solid #c47528;outline-offset:3px}')
+    html = ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>Betafolio briefing</title><style>{style}</style></head><body><main><h1>Betafolio briefing</h1>{body}</main></body></html>')
     return html, "\n\n".join(lines)
 
 
@@ -233,7 +335,7 @@ def send_report(result: Any, config: SMTPConfig, password: str, verified_recipie
         return DeliveryOutcome(status="failed", message="Verify the configured owner email address before sending reports.")
     html, plain = render_report(result, config.percent_only)
     message = EmailMessage()
-    message["Subject"] = "Your portfolio briefing"
+    message["Subject"] = "Your Betafolio briefing"
     message["From"] = config.sender
     message["To"] = config.recipient
     message.set_content(plain)

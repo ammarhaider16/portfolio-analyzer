@@ -10,7 +10,10 @@ def calculate_metrics(snapshot: PortfolioSnapshot) -> dict:
     sectors: dict[str, Decimal] = {}
     changes: dict[str, Decimal] = {}
     missing = []
+    unsupported = set(snapshot.unsupported)
     for position in snapshot.positions:
+        if position.symbol in unsupported:
+            continue
         if position.price is None:
             missing.append(position.symbol)
             continue
@@ -33,7 +36,7 @@ def calculate_metrics(snapshot: PortfolioSnapshot) -> dict:
         "largest_position_pct": max(weights.values(), default=0),
         "daily_price_contributions": {k: str(v) for k, v in changes.items()},
         "daily_price_change_estimate": str(sum(changes.values(), Decimal(0))) if changes else None,
-        "priced_positions": len(snapshot.positions) - len(missing),
+        "priced_positions": len(snapshot.positions) - len(missing) - len(unsupported),
         "total_positions": len(snapshot.positions),
         "missing_prices": missing, "unsupported": snapshot.unsupported,
         "coverage_complete": not missing and not snapshot.unsupported,
@@ -99,4 +102,4 @@ def benchmark_comparison(snapshot: PortfolioSnapshot, histories: dict[str, dict[
             "current_portfolio_return_estimate_pct": portfolio_pct, "benchmark_return_pct": benchmark_pct,
             "relative_change_percentage_points": portfolio_pct - benchmark_pct,
             "covered_known_value_pct": sum(metrics["weights_pct"][s] for s in symbols),
-            "method": "Current weights, daily rebalancing, adjusted closes on common dates; cash and missing history assumed flat. Not realized account performance."}
+            "method": "Scenario using today's holdings and weights, daily rebalancing, and adjusted closes on common dates; cash and missing history assumed flat. The benchmark is fully invested, so the comparison reflects different cash exposure. Not realized account performance."}

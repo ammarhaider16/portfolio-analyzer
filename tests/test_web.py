@@ -81,6 +81,20 @@ def test_import_preview_requires_confirmation(tmp_path):
         assert client.get('/api/status').json()['snapshot']['cash'] == '5'
 
 
+def test_ticker_price_csv_needs_quantity_before_saving(tmp_path):
+    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
+        token = csrf(client)
+        body = {'csv': 'ticker,price\nSPUS,40.50', 'as_of': '2026-10-18T12:00:00Z'}
+        preview = post(client, token, '/api/import', body)
+        assert preview.status_code == 200
+        assert preview.json()['positions'][0]['quantity'] is None
+        assert post(client, token, '/api/import', body | {'confirm': True}).status_code == 400
+        assert client.get('/api/status').json()['snapshot'] is None
+        draft = preview.json()
+        draft['positions'][0]['quantity'] = '3'
+        assert post(client, token, '/api/portfolio', {'snapshot': draft}).status_code == 200
+
+
 def test_csrf_origin_and_host_restrictions(tmp_path):
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
         assert client.post('/api/runs', json={'source': 'demo'}).status_code == 403
@@ -233,6 +247,9 @@ def test_model_connection_probe_uses_real_portfolio_metrics(tmp_path, monkeypatc
         response = post(client, csrf(client), '/api/test/model', {})
         assert response.status_code == 200, response.text
         assert len(calls) == 1
+        assert client.get('/api/status').json()['connection_tests']['model']['status'] == 'passed'
+        assert post(client, csrf(client), '/api/settings', {'model_enabled': True}).status_code == 200
+        assert 'model' not in client.get('/api/status').json()['connection_tests']
 
 
 @pytest.mark.parametrize('method,path', [

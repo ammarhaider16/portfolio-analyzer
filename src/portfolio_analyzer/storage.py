@@ -21,6 +21,8 @@ class Store:
                   result TEXT, error TEXT, schedule_key TEXT UNIQUE, delivery TEXT,
                   email_requested INTEGER NOT NULL DEFAULT 0);
             """)
+            if "summary" not in {row[1] for row in db.execute("PRAGMA table_info(runs)")}:
+                db.execute("ALTER TABLE runs ADD COLUMN summary TEXT")
 
     @contextmanager
     def db(self):
@@ -58,14 +60,14 @@ class Store:
         return True
 
     def update_run(self, run_id, **changes):
-        allowed = {"status", "result", "error", "delivery"}
+        allowed = {"status", "result", "error", "delivery", "summary"}
         if not changes or set(changes) - allowed:
             raise ValueError("Invalid run update")
         with self.db() as db:
             db.execute("UPDATE runs SET " + ",".join(f"{key}=?" for key in changes) + " WHERE id=?", (*changes.values(), run_id))
 
     def finish(self, result: AnalysisResult):
-        self.update_run(result.run_id, status=result.status, result=result.model_dump_json())
+        self.update_run(result.run_id, status=result.status, result=result.model_dump_json(), summary=result.coverage.get("summary"))
 
     def claim_delivery(self, run_id):
         with self.db() as db:
@@ -78,7 +80,7 @@ class Store:
 
     def history(self, limit=30):
         with self.db() as db:
-            return [dict(row) for row in db.execute("SELECT id,created_at,status,error,delivery,schedule_key FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))]
+            return [dict(row) for row in db.execute("SELECT id,created_at,status,error,delivery,schedule_key,summary FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))]
 
     def has_schedule(self, key):
         with self.db() as db:

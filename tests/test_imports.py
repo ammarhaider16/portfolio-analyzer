@@ -34,6 +34,20 @@ def test_unknown_price_is_preserved():
     assert snapshot.positions[0].price is None
 
 
+def test_ticker_and_price_only_creates_reviewable_draft_without_invented_quantity():
+    draft = parse_holdings_csv('Ticker,Price\nSPUS,$40.50\nNVDA,120.25', datetime.now(timezone.utc))
+    assert [position.symbol for position in draft.positions] == ['SPUS', 'NVDA']
+    assert [position.price for position in draft.positions] == [Decimal('40.50'), Decimal('120.25')]
+    assert all(position.quantity is None and position.asset_type == 'unknown' for position in draft.positions)
+    assert draft.cash == 0
+
+
+def test_cash_price_only_uses_price_as_cash_amount():
+    draft = parse_holdings_csv('ticker,price\nABC,5\nCASH,"$1,250.50"', datetime.now(timezone.utc))
+    assert draft.cash == Decimal('1250.50')
+    assert len(draft.positions) == 1
+
+
 @pytest.mark.parametrize('amount', ['"1,23"', '$-5', 'Infinity', '1e999999', '$', '(10)'])
 def test_invalid_currency_amount_rejected(amount):
     with pytest.raises(ValueError, match='finite nonnegative'):

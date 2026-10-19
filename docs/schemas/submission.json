@@ -57,7 +57,7 @@
           "type": "string"
         },
         "max_searches": {
-          "default": 8,
+          "default": 30,
           "maximum": 30,
           "minimum": 0,
           "title": "Max Searches",
@@ -202,9 +202,35 @@
           "title": "Price"
         },
         "asset_type": {
-          "default": "stock",
+          "default": "unknown",
           "title": "Asset Type",
           "type": "string"
+        },
+        "instrument_name": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Instrument Name"
+        },
+        "exchange": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exchange"
         },
         "sector": {
           "anyOf": [

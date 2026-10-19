@@ -1,5 +1,6 @@
 """Optional providers. Network access occurs only when explicitly configured."""
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import socket
@@ -73,9 +74,22 @@ class TavilyResearchProvider:
         self.api_key = api_key
 
     async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
+        return await self._search(query, max_results, topic="general")
+
+    async def search_events(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
+        return await self._search(query, max_results, topic="news", reporting_cutoff=reporting_cutoff)
+
+    async def _search(self, query: str, max_results: int, *, topic: str, reporting_cutoff=None) -> list[Evidence]:
         import httpx
+        payload = {"api_key": self.api_key, "query": query, "max_results": max_results,
+                   "search_depth": "basic", "topic": topic}
+        if topic == "news":
+            if reporting_cutoff is None:
+                payload["time_range"] = "month"
+            else:
+                payload["end_date"] = reporting_cutoff.date().isoformat()
         async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
-            response = await client.post("https://api.tavily.com/search", json={"api_key": self.api_key, "query": query, "max_results": max_results, "search_depth": "basic"})
+            response = await client.post("https://api.tavily.com/search", json=payload)
             response.raise_for_status()
             results = []
             for row in response.json().get("results", []):
@@ -115,6 +129,25 @@ class DDGSResearchProvider:
 class YFinanceMarketDataProvider:
     def __init__(self, refresh_existing: bool = True):
         self.refresh_existing = refresh_existing
+
+    async def resolve_instrument(self, symbol: str) -> dict | None:
+        """Return exact-symbol quote identity, or abstain on missing/ambiguous data."""
+        def fetch():
+            import yfinance as yf
+            return yf.Ticker(symbol).get_info()
+        info = await asyncio.to_thread(fetch)
+        if not isinstance(info, dict) or str(info.get("symbol", "")).upper() != symbol.upper():
+            return None
+        type_map = {"EQUITY": "stock", "ETF": "etf", "MUTUALFUND": "mutual_fund", "INDEX": "index"}
+        asset_type = type_map.get(str(info.get("quoteType", "")).upper())
+        name = info.get("longName") or info.get("shortName")
+        if not asset_type or not isinstance(name, str) or not name.strip():
+            return None
+        exchange = info.get("fullExchangeName") or info.get("exchange")
+        return {"symbol": symbol, "asset_type": asset_type, "instrument_name": name.strip()[:200],
+                "exchange": str(exchange).strip()[:40] if exchange else None,
+                "sector": str(info["sector"]).strip()[:100] if asset_type == "stock" and info.get("sector") else None,
+                "source": "yfinance", "resolved_at": datetime.now(timezone.utc).isoformat()}
 
     async def enrich(self, snapshot: PortfolioSnapshot) -> PortfolioSnapshot:
         result, _ = await self.enrich_with_metadata(snapshot)
@@ -179,7 +212,7 @@ class PrimaryFeedResearchProvider:
                 self._feed_cache[url] = (time.monotonic(), content)
             return content
 
-    async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
+    async def search(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
         import re
         from xml.etree import ElementTree
         from email.utils import parsedate_to_datetime
@@ -213,13 +246,25 @@ class PrimaryFeedResearchProvider:
                             source.published_at = parsedate_to_datetime(published)
                         except ValueError:
                             source.published_at = datetime.fromisoformat(published.replace("Z", "+00:00"))
+                        if source.published_at and source.published_at.tzinfo is None:
+                            source.published_at = source.published_at.replace(tzinfo=timezone.utc)
                     source.content_type = "official_feed"
                     found.append(source)
             except Exception:
                 continue
         if self.fallback and len(found) < max_results:
-            found.extend(await self.fallback.search(query, max_results=max_results - len(found)))
+            if reporting_cutoff is not None or hasattr(self.fallback, "search_events"):
+                search = getattr(self.fallback, "search_events", None)
+                if search:
+                    found.extend(await search(query, max_results=max_results - len(found), reporting_cutoff=reporting_cutoff))
+                else:
+                    found.extend(await self.fallback.search(query, max_results=max_results - len(found)))
+            else:
+                found.extend(await self.fallback.search(query, max_results=max_results - len(found)))
         return found[:max_results]
+
+    async def search_events(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
+        return await self.search(query, max_results=max_results, reporting_cutoff=reporting_cutoff)
 
     async def retrieve(self, source: Evidence) -> Evidence:
         content = await self._fetch(source.url)

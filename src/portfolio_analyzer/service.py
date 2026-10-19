@@ -81,7 +81,8 @@ def build_dependencies(settings, secret_store):
         if key:
             research = SupplementalResearch(research or PrimaryFeedResearchProvider(), AlphaVantageResearchProvider(key))
     model = create_model(settings, secret_store) if settings.model_enabled else None
-    return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.market_data_enabled else None, model=model)
+    return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.market_data_enabled else None,
+                              instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model)
 
 
 class ApplicationService:

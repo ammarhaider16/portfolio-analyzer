@@ -28,6 +28,7 @@ from .imports import parse_holdings_csv, validate_portfolio_snapshot
 from .models import AnalysisRequest, AnalysisResult, PortfolioSnapshot
 from .scheduling import next_session_run
 from .service import ApplicationService, build_dependencies, create_model, read_secret
+from .screenshot_import import DraftPosition
 
 
 class RunSubmission(BaseModel):
@@ -42,6 +43,11 @@ class RunSubmission(BaseModel):
 class PortfolioUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     snapshot: PortfolioSnapshot
+
+
+class EnrichmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    positions: list[DraftPosition] = Field(min_length=1, max_length=30)
 
 
 class ScreenshotSubmission(BaseModel):
@@ -83,7 +89,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         await service.close()
         await asyncio.gather(scheduler, return_exceptions=True)
 
-    app = FastAPI(title="Portfolio research", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Betafolio research", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service = service
     package = Path(__file__).parent
     app.mount("/static", StaticFiles(directory=package / "static"), name="static")
@@ -246,7 +252,13 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                 "externally_managed": sorted(externally_managed()), "next_run": next_run,
                 "verified_recipient": service.store.get("verified_recipient"), "server": server,
                 "scheduler_error": service.store.get("scheduler_error"),
-                "secrets_present": {name: bool(read_secret(service.secrets, name)) for name in ("model_api_key", "tavily_api_key", "smtp_password", "alpha_vantage_api_key")}}
+                "connection_tests": service.store.get("connection_tests", {}),
+                "secrets_present": {name: bool(read_secret(service.secrets, name)) for name in ("model_api_key", "tavily_api_key", "smtp_password", "alpha_vantage_api_key")},
+                "secrets_editable": {name: not server and not any(os.environ.get(key) or os.environ.get(key + "_FILE")
+                    for key in (("PORTFOLIO_SECRET_" + name.upper(),) + aliases))
+                    for name, aliases in {"model_api_key": ("LITELLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"),
+                                          "tavily_api_key": ("TAVILY_API_KEY",), "smtp_password": (),
+                                          "alpha_vantage_api_key": ("ALPHA_VANTAGE_API_KEY",)}.items()}}
 
     @app.post("/api/settings")
     async def settings_update(request: Request):
@@ -267,6 +279,12 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             raise ValueError("Verify an email recipient before enabling scheduled delivery")
         if updated.schedule.enabled and not current.schedule.enabled:
             service.store.set("schedule_enabled_at", time.time())
+        tests = service.store.get("connection_tests", {})
+        if current.model != updated.model or current.model_enabled != updated.model_enabled:
+            tests.pop("model", None)
+        if any(getattr(current, field) != getattr(updated, field) for field in ("search_provider", "primary_feeds_enabled", "sec_contact", "alpha_vantage_enabled")):
+            tests.pop("search", None)
+        service.store.set("connection_tests", tests)
         save_settings(directory, updated)
         return {"ok": True}
 
@@ -282,10 +300,15 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             await asyncio.to_thread(service.secrets.set, name, value)
         except SecretStorageError as exc:
             raise ValueError(str(exc)) from None
+        tests = service.store.get("connection_tests", {})
+        tests.pop("model" if name == "model_api_key" else "search" if name in {"tavily_api_key", "alpha_vantage_api_key"} else "email", None)
+        service.store.set("connection_tests", tests)
         return {"ok": True}
 
     @app.post("/api/test/{kind}")
     async def test_connection(kind: str):
+        if kind not in {"model", "search"}:
+            raise HTTPException(404)
         try:
             async with asyncio.timeout(50):
                 if kind == "model":
@@ -302,12 +325,16 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                     results = await dep.research.search("Federal Reserve latest policy announcement", max_results=1)
                     if not results:
                         raise ValueError("Search returned no results")
-                else:
-                    raise HTTPException(404)
         except HTTPException:
             raise
         except Exception:
+            tests = service.store.get("connection_tests", {})
+            tests[kind] = {"status": "failed", "tested_at": datetime.now(timezone.utc).isoformat()}
+            service.store.set("connection_tests", tests)
             raise ValueError("Connection test failed. Check provider, credentials, model capabilities, quota, and network access.") from None
+        tests = service.store.get("connection_tests", {})
+        tests[kind] = {"status": "passed", "tested_at": datetime.now(timezone.utc).isoformat()}
+        service.store.set("connection_tests", tests)
         return {"ok": True, "message": "Connection and required response format verified"}
 
     @app.post("/api/import")
@@ -319,8 +346,16 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             raise ValueError("Choose a holdings CSV smaller than 500 KB")
         snapshot = parse_holdings_csv(content, timestamp)
         if body.get("confirm"):
-            service.store.save_snapshot(snapshot)
+            if any(position.quantity is None for position in snapshot.positions):
+                raise ValueError("Enter quantities for every holding before saving the imported portfolio")
+            saved = validate_portfolio_snapshot(PortfolioSnapshot.model_validate(snapshot.model_dump()))
+            service.store.save_snapshot(saved)
         return snapshot.model_dump(mode="json")
+
+    @app.get("/api/import/template")
+    async def import_template():
+        return PlainTextResponse("ticker,price,quantity\nAAPL,200,10\nCASH,1000,\n", media_type="text/csv",
+                                 headers={"Content-Disposition": 'attachment; filename="portfolio-template.csv"'})
 
     @app.post("/api/portfolio")
     async def update_portfolio(update: PortfolioUpdate):
@@ -329,6 +364,12 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         snapshot.account_id = "manual"
         service.store.save_snapshot(snapshot)
         return snapshot.model_dump(mode="json")
+
+    @app.post("/api/portfolio/enrich")
+    async def enrich_portfolio(request: EnrichmentRequest):
+        from .enrichment import PortfolioEnrichmentAgent
+        async with asyncio.timeout(45):
+            return await PortfolioEnrichmentAgent().enrich(request.positions)
 
     @app.post("/api/import/image")
     async def import_image(submission: ScreenshotSubmission):

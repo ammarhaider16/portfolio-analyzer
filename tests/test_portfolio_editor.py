@@ -93,7 +93,8 @@ class Element {
   setAttribute(){}
   addEventListener(name,callback){this.handlers[name]=callback;}
   remove(){this.parent.children=this.parent.children.filter(child=>child!==this);}
-  querySelectorAll(){return this.children.flatMap(child=>child.children).filter(child=>child.dataset.field);}
+  get firstElementChild(){return this.children[0];}
+  querySelectorAll(){const visit=(item)=>[...(item.dataset.field?[item]:[]),...item.children.flatMap(visit)];return this.children.flatMap(visit);}
   get textContent(){return this._text;}
   set textContent(value){this._text=value;}
 }
@@ -111,7 +112,7 @@ assert.equal(collectPortfolio().positions[1].price,'1000.25');
 addHolding({symbol:'ABC',quantity:'1'});
 assert.throws(()=>collectPortfolio(),/Duplicate/);
 const row=document.querySelector('#holdings-rows').children[2];
-row.children[6].children[0].handlers.click();
+row.children[3].children[0].handlers.click();
 assert.equal(collectPortfolio().positions.length,2);
 document.querySelector('#portfolio-cash').value='1,23';
 assert.throws(()=>collectPortfolio(),/nonnegative/);

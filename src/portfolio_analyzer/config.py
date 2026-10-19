@@ -35,12 +35,12 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: ModelConfig = Field(default_factory=ModelConfig)
     model_enabled: bool = False
-    search_provider: Literal["tavily", "keyless", "disabled"] = "tavily"
+    search_provider: Literal["tavily", "keyless", "disabled"] = "keyless"
     market_data_enabled: bool = False
     primary_feeds_enabled: bool = True
     alpha_vantage_enabled: bool = False
     sec_contact: str = ""
-    max_searches: int = Field(default=8, ge=0, le=30)
+    max_searches: int = Field(default=30, ge=0, le=30)
     max_seconds: int = Field(default=120, ge=1, le=600)
     max_data_age_hours: int = Field(default=72, ge=1, le=8760)
     benchmark: str = "SPY"

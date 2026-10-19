@@ -1,4 +1,4 @@
-# Portfolio Analyzer
+# Betafolio
 
 A personal portfolio dashboard with read-only research. Maintain holdings and cash manually, review CSV or screenshot imports, and run analyses on demand or on an optional schedule. There is no brokerage login, synchronization, or trading integration.
 
@@ -17,9 +17,11 @@ Open **http://127.0.0.1:8000**. The demonstration portfolio runs offline without
 
 **Overview → Holdings & cash** is your portfolio dashboard. Add, edit, and remove positions; set the snapshot date; and enter cash in its separate field. Save before generating a briefing. Unsaved changes are preserved during dashboard refresh and block manual runs until saved or discarded.
 
+Use **Fill missing details** on a draft to look up exact-ticker instrument names, types, sectors, exchanges, and missing daily-close prices. It proposes changes for review and never fills share counts, replaces values you entered, or saves the portfolio automatically. The button supports up to 30 holdings at a time and requires network access to the market-data provider.
+
 Under **Imports & models**, choose either:
 
-- **CSV:** preview a file, review/edit its positions and cash in the dashboard, then save. See [examples/holdings.csv](examples/holdings.csv). Required columns are `symbol,quantity`; optional columns are `price,asset_type,sector,previous_close`. CASH, USD, and cash-type rows are recognized as cash. Cash uses quantity × price, with price defaulting to 1. Quoted currency amounts such as `"$1,250.50"` are supported. Missing prices remain unknown.
+- **CSV:** download a template in **Import & research**, preview a file, review/edit its positions and cash in the dashboard, then save. See [examples/holdings.csv](examples/holdings.csv). Supply a `ticker` (or `symbol`) and `price` per share. `quantity` is optional in the file, but you must enter it in the review screen before saving because share count cannot be inferred from price. The draft names missing share counts and focuses the first one. Older `symbol,quantity` files remain accepted. Instrument type, issuer name, sector, and previous close are optional; research fills available metadata without inventing missing values. CASH and cash-type rows become the cash balance. With only `ticker,price`, a CASH row treats price as the cash amount. Quoted currency amounts such as `"$1,250.50"` are supported.
 - **Screenshot:** upload PNG, JPEG, or WebP up to 5 MB. Explicitly authorize sending the image to your configured model. A vision-capable model is required; the Colgate text-model preset might not support images. Extraction creates an unsaved draft. Unreadable quantities and cash remain blank and must be filled in before saving. Review every value: image extraction can make mistakes. Crop out account numbers and unrelated personal details. Original image bytes are not saved by this application.
 
 Cash-only portfolios are supported. Duplicate holding rows must be combined before saving. The current portfolio is always the **latest saved** draft, not a partially edited import. Saving an edit replaces the current portfolio. Previous reports keep their original results.
@@ -31,14 +33,16 @@ Scheduled runs use the most recently saved quantities and cash at the start of t
 ## Configure research
 
 1. Configure and test a model in **Imports & models**. Colgate LiteLLM defaults to `openai/gpt-oss-120b` at `https://litellm.colgate.edu`. OpenAI, Anthropic, and custom OpenAI-compatible endpoints are supported.
-2. Select Tavily search with a free-tier key, keyless DDGS search, or disable external research. Provider quotas still apply.
+2. Keyless search and official feeds are enabled by default for saved portfolios. For more dependable news discovery, choose Tavily and add a key; you can also disable external research. Provider quotas still apply.
 3. Optionally enable yfinance for daily closing prices and historical estimates. It is unofficial and intended for personal use.
 4. Optionally supplement broad search with Federal Reserve/BLS feeds, identified SEC current-filings discovery, or a paid Alpha Vantage news key.
-5. Generate a briefing from **My latest saved portfolio**. The saved report appears in Research history.
+5. Generate a briefing from **My saved portfolio**. The finished conclusions appear below the portfolio summary and remain available in Research history. The dashboard shows whether portfolio measures, current-event search, and written analysis are configured and last tested.
 
-Model API access needs a key with access to the selected model. No model is enabled by default. Missing or failed providers leave clearly labeled partial reports. Web snippets are discovery references; accepted generated findings require retrieved or official evidence. Search coverage is not a guaranteed events calendar, and coincident news does not establish causation.
+Model API access needs a key with access to the selected model. No model is enabled by default. Missing or failed providers leave labeled coverage notes. Web snippets are discovery references; event findings require retrieved or official evidence tied to the correct instrument. Search coverage is not a guaranteed events calendar, and coincident news does not establish causation.
 
-Configure report detail, benchmark, review thresholds, research/time budgets, maximum snapshot age, and retention under **Preferences**. Adjustment ideas require a complete investment profile and an explicit per-run request. That checkbox resets after a run; scheduled reports never request adjustment ideas.
+The briefing gives a short interpretation even when external research is unavailable. It names excluded holdings beside known values and percentages, and explains any missing event evidence. It checks each position up to the configured search limit and lists verified position news with source links; detailed reports list price, previous close, type, and news status for every saved holding. Holdings beyond the search limit are marked as not checked. Market and policy items are shown separately when a relevant source is found. Raw metrics remain in the structured result. Configure report detail and optional investment targets under **Preferences**; enter common stock, bond, and cash targets as percentages, with other targets and technical limits under advanced controls. Adjustment ideas require a complete investment profile and an explicit per-run request. That checkbox resets after a run; scheduled reports never request adjustment ideas.
+
+Saved API and SMTP secrets appear as masked, configured credentials in settings. Use **Change secret** to enter a replacement; an unchanged secret is never sent back to the browser.
 
 V1 covers stocks, ETFs, and cash. Unsupported or unpriced holdings are shown. Weights use known valued assets. Price contributions use current quantities and previous closes, not cash-flow-adjusted account returns. Historical volatility, drawdown, and benchmark comparisons estimate today's portfolio using shared historical dates; they do not reconstruct the user's realized experience. Missing histories can understate risk. Complete ETF look-through, options/crypto analytics, transaction accounting, tax-lot advice, and trading are outside scope.
 
@@ -46,7 +50,7 @@ V1 covers stocks, ETFs, and cash. Unsupported or unpriced holdings are shown. We
 
 Both features are entirely optional and independent. Scheduling can save dashboard reports without email; a manual report can be emailed without a schedule.
 
-Email uses your mailbox's SMTP service, certificate-validated implicit TLS or required STARTTLS, and one verified owner recipient. Use an app password when supported. Changing the recipient clears verification and scheduled delivery. Messages contain HTML plus equivalent plain text, with plain-text-only and percentage-only options. The latter omits amounts, narrative, and sources to avoid leaking amounts through prose. No CC, BCC, tracking pixels, or model-selected recipients are supported.
+Email uses your mailbox's SMTP service, certificate-validated implicit TLS or required STARTTLS, and one verified owner recipient. The dashboard offers Gmail and iCloud Mail presets with provider instructions; other SMTP settings remain editable. Use an app password when supported. Outlook.com requires OAuth2 and is not supported by this password-based SMTP form. Changing the recipient clears verification and scheduled delivery. Messages contain HTML plus equivalent plain text, with plain-text-only and percentage-only options. The latter omits amounts, narrative, and sources to avoid leaking amounts through prose. No CC, BCC, tracking pixels, or model-selected recipients are supported.
 
 Scheduling defaults to 30 minutes after the NYSE close, accounting for holidays, early closes, and daylight saving changes. It reads the latest saved portfolio each run. Your computer must be awake and the app running. Restart recovery processes only the latest eligible missed session since scheduling was enabled. Overlapping and duplicate session runs are blocked. Uncertain email acceptance is not automatically retried.
 

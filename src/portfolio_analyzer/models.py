@@ -1,5 +1,5 @@
 """Versioned, serializable contracts shared by all research callers."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
 from uuid import uuid4
@@ -15,7 +15,9 @@ class Position(Contract):
     symbol: str = Field(min_length=1, max_length=40)
     quantity: Decimal = Field(ge=0)
     price: Decimal | None = Field(default=None, ge=0)
-    asset_type: str = "stock"
+    asset_type: str = "unknown"
+    instrument_name: str | None = Field(default=None, max_length=200)
+    exchange: str | None = Field(default=None, max_length=40)
     sector: str | None = None
     previous_close: Decimal | None = Field(default=None, ge=0)
 
@@ -82,7 +84,7 @@ class AnalysisRequest(Contract):
     investment_profile: dict[str, Any] | None = None
     benchmark: str = Field(default="SPY", max_length=40)
     report_length: Literal["brief", "detailed"] = "brief"
-    max_searches: int = Field(default=8, ge=0, le=30)
+    max_searches: int = Field(default=30, ge=0, le=30)
     max_seconds: int = Field(default=120, ge=1, le=600)
     max_data_age_hours: int = Field(default=72, ge=1, le=8760)
     position_review_threshold_pct: float = Field(default=25, gt=0, le=100)
@@ -118,6 +120,10 @@ class Finding(Contract):
     detail: str
     evidence_ids: list[str] = Field(default_factory=list)
     kind: str = "observation"
+    affected_symbols: list[str] = Field(default_factory=list, max_length=30)
+    event_date: date | None = None
+    portfolio_relevance: str | None = Field(default=None, max_length=1000)
+    uncertainty: str | None = Field(default=None, max_length=1000)
 
 
 class AnalysisResult(Contract):
@@ -127,6 +133,7 @@ class AnalysisResult(Contract):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     snapshot_as_of: datetime
     metrics: dict[str, Any] = Field(default_factory=dict)
+    coverage: dict[str, Any] = Field(default_factory=dict)
     findings: list[Finding] = Field(default_factory=list)
     sources: list[Evidence] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
