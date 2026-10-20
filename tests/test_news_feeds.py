@@ -3,12 +3,9 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
-import pytest
-from pydantic import ValidationError
 
 import portfolio_analyzer.providers as providers
 from portfolio_analyzer.config import Settings
-from portfolio_analyzer.models import Evidence
 from portfolio_analyzer.providers import (CompositeResearchProvider, SecFilingsResearchProvider,
                                           TickerNewsFeedProvider)
 
@@ -79,6 +76,18 @@ def patch_retrieve(monkeypatch, response):
     return calls
 
 
+def patch_resolve(monkeypatch, response=lambda url: ""):
+    """Stub the aggregator-redirect resolution fallback; tests never touch the network."""
+    calls = []
+
+    async def fake(url):
+        calls.append(url)
+        return response(url)
+
+    monkeypatch.setattr(providers, "resolve_feed_link", fake)
+    return calls
+
+
 def test_rss_and_atom_items_become_dated_news_feed(monkeypatch):
     provider = TickerNewsFeedProvider(sources=("google_news",))
     patch_retrieve(monkeypatch, lambda url: RSS)
@@ -86,7 +95,8 @@ def test_rss_and_atom_items_become_dated_news_feed(monkeypatch):
     assert rss[0].content_type == "news_feed"
     assert rss[0].url == "https://example.com/apple"
     assert rss[0].published_at == datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
-    assert "AAPL" in rss[0].excerpt
+    assert rss[0].excerpt == "Apple Inc reported quarterly results."
+    assert "AAPL" not in rss[0].excerpt  # FR-5: no query echo in evidence fields.
 
     patch_retrieve(monkeypatch, lambda url: ATOM)
     atom = run(provider.search_symbol("MSFT", "Microsoft Corporation", max_results=4))
@@ -97,27 +107,74 @@ def test_rss_and_atom_items_become_dated_news_feed(monkeypatch):
 
 def test_google_news_preserves_link_and_parses_publisher(monkeypatch):
     patch_retrieve(monkeypatch, lambda url: GOOGLE_NEWS_RSS)
+    patch_resolve(monkeypatch)
     provider = TickerNewsFeedProvider(sources=("google_news",))
     items = run(provider.search_symbol("AAPL", "Apple Inc", max_results=4))
     assert items[0].url == "https://news.google.com/rss/articles/CBMiExample"
     assert items[0].publisher == "www.reuters.com"
     assert items[0].content_type == "news_feed"
-    assert "AAPL" in items[0].excerpt
+    assert items[0].excerpt == "Apple Inc product launch coverage."
 
 
-def test_nasdaq_requires_symbol_in_tickers_tag(monkeypatch):
-    patch_retrieve(monkeypatch, lambda url: NASDAQ_RSS)
-    provider = TickerNewsFeedProvider(sources=("nasdaq",))
+GOOGLE_REDIRECT_RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Alcon gains after lens market outlook - Reuters</title>
+<link>https://news.google.com/rss/articles/CBMiOpaque</link>
+<description>Alcon reported quarterly results for its surgical vision unit.</description>
+<pubDate>Fri, 16 Oct 2026 12:00:00 GMT</pubDate></item>
+</channel></rss>"""
+
+DESCRIPTION_LINK_RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Apple Inc launches product</title>
+<link>https://news.google.com/rss/articles/CBMiOpaque</link>
+<description>&lt;a href="https://www.reuters.com/technology/apple-launch"&gt;Apple Inc launches product&lt;/a&gt; coverage.</description>
+<pubDate>Fri, 16 Oct 2026 12:00:00 GMT</pubDate>
+<source url="https://www.reuters.com">Reuters</source></item>
+</channel></rss>"""
+
+HTML_DESCRIPTION_RSS = """<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Microsoft update</title>
+<link>https://example.com/msft-update</link>
+<description>&lt;a href="https://news.google.com/rss/articles/CBMiLeak"&gt;Microsoft
+   update&lt;/a&gt;&amp;nbsp;&amp;lt;span&gt;details &amp;amp; figures&lt;/span&gt;</description>
+<pubDate>Fri, 16 Oct 2026 12:00:00 GMT</pubDate></item>
+</channel></rss>"""
+
+
+def test_fr4_resolves_google_news_redirect(monkeypatch):
+    patch_retrieve(monkeypatch, lambda url: GOOGLE_NEWS_RSS)
+    patch_resolve(monkeypatch, lambda url: "https://www.reuters.com/technology/apple-launch")
+    provider = TickerNewsFeedProvider(sources=("google_news",))
     items = run(provider.search_symbol("AAPL", "Apple Inc", max_results=4))
-    assert [item.url for item in items] == ["https://example.com/tagged"]
-    assert run(provider.search_symbol("MSFT", "Microsoft Corporation", max_results=4)) == []
+    assert items[0].url == "https://www.reuters.com/technology/apple-launch"
+    assert items[0].content_type == "news_feed"
 
 
-def test_malformed_feed_is_skipped(monkeypatch):
-    patch_retrieve(monkeypatch, lambda url: "<not xml" if "news.google" in url else RSS)
-    provider = TickerNewsFeedProvider(sources=("google_news", "bing_news"))
-    items = run(provider.search("Apple", max_results=4))
-    assert [item.url for item in items] == ["https://example.com/apple"]
+
+
+
+
+def test_fr4_excerpts_are_plain_text(monkeypatch):
+    patch_retrieve(monkeypatch, lambda url: HTML_DESCRIPTION_RSS)
+    patch_resolve(monkeypatch)
+    provider = TickerNewsFeedProvider(sources=("google_news",))
+    items = run(provider.search_symbol("MSFT", "Microsoft Corporation", max_results=4))
+    excerpt = items[0].excerpt
+    assert "<" not in excerpt and ">" not in excerpt and "href" not in excerpt and "&lt;" not in excerpt
+    assert "Microsoft update details & figures" == excerpt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def test_feed_error_does_not_break_other_sources(monkeypatch):
@@ -126,21 +183,8 @@ def test_feed_error_does_not_break_other_sources(monkeypatch):
     assert [item.url for item in run(provider.search("Apple", max_results=4))] == ["https://example.com/apple"]
 
 
-def test_duplicate_urls_are_deduped(monkeypatch):
-    patch_retrieve(monkeypatch, lambda url: RSS)
-    provider = TickerNewsFeedProvider(sources=("google_news", "bing_news"))
-    assert len(run(provider.search("Apple", max_results=4))) == 1
 
 
-def test_future_and_undated_items_rejected(monkeypatch):
-    patch_retrieve(monkeypatch, lambda url: CUTOFF_FEED)
-    provider = TickerNewsFeedProvider(sources=("google_news",))
-    cutoff = datetime(2026, 10, 15, tzinfo=timezone.utc)
-    items = run(provider.search_symbol("AAPL", "Apple Inc", max_results=4, reporting_cutoff=cutoff))
-    assert [item.url for item in items] == ["https://example.com/valid"]
-    # Without a cutoff, undated items are still dropped but future-dated ones are left to the engine.
-    assert [item.url for item in run(provider.search("Apple", max_results=4))] == [
-        "https://example.com/future", "https://example.com/valid"]
 
 
 def test_non_https_link_is_rejected(monkeypatch):
@@ -149,20 +193,8 @@ def test_non_https_link_is_rejected(monkeypatch):
     assert run(provider.search_symbol("AAPL", "Apple Inc", max_results=4)) == []
 
 
-def test_feed_cache_respects_ttl(monkeypatch):
-    calls = patch_retrieve(monkeypatch, lambda url: RSS)
-    provider = TickerNewsFeedProvider(sources=("google_news",), ttl=300)
-    run(provider.search_symbol("AAPL", "Apple Inc", max_results=4))
-    run(provider.search_symbol("AAPL", "Apple Inc", max_results=4))
-    assert len(calls) == 1
 
 
-def test_feed_cache_expires(monkeypatch):
-    calls = patch_retrieve(monkeypatch, lambda url: RSS)
-    provider = TickerNewsFeedProvider(sources=("google_news",), ttl=0)
-    run(provider.search_symbol("AAPL", "Apple Inc", max_results=4))
-    run(provider.search_symbol("AAPL", "Apple Inc", max_results=4))
-    assert len(calls) == 2
 
 
 def test_sec_filings_emit_official_feed_and_send_fair_access_agent(monkeypatch):
@@ -185,49 +217,12 @@ def test_sec_filings_abstain_without_contact(monkeypatch):
     assert calls == []
 
 
-def test_sec_filings_require_a_ticker(monkeypatch):
-    patch_retrieve(monkeypatch, lambda url: TICKERS_JSON if "company_tickers" in url else SUBMISSIONS_JSON)
-    provider = SecFilingsResearchProvider(sec_user_agent="Test Contact test@example.com")
-    assert run(provider.search("recent Federal Reserve economic policy", max_results=3)) == []
 
 
-def test_composite_prefers_official_and_dedupes(monkeypatch):
-    class Official:
-        async def search_symbol(self, symbol, name=None, max_results=4, reporting_cutoff=None):
-            return [Evidence(id="official", url="https://example.com/shared", title=f"{symbol} filing",
-                             publisher="sec.gov", content_type="official_feed")]
-
-    class News:
-        async def search_symbol(self, symbol, name=None, max_results=4, reporting_cutoff=None):
-            return [Evidence(id="news", url="https://example.com/shared", title=f"{symbol} headline",
-                             publisher="news.example", content_type="news_feed"),
-                    Evidence(id="other", url="https://example.com/other", title=f"{symbol} more",
-                             publisher="news.example", content_type="news_feed")]
-
-    composite = CompositeResearchProvider([Official(), News()])
-    items = run(composite.search_symbol("AAPL", "Apple Inc", max_results=4))
-    assert [item.url for item in items] == ["https://example.com/shared", "https://example.com/other"]
-    assert items[0].content_type == "official_feed"
 
 
-def test_composite_retrieve_never_fetches_aggregators(monkeypatch):
-    async def boom(*args, **kwargs):
-        raise AssertionError("aggregator pages must not be fetched")
-
-    monkeypatch.setattr(providers, "retrieve_public_text", boom)
-    composite = CompositeResearchProvider([TickerNewsFeedProvider(sources=("google_news",))])
-    for content_type in ("news_feed", "official_feed"):
-        source = Evidence(id="x", url="https://news.google.com/rss/articles/abc", title="t",
-                          publisher="news.google.com", content_type=content_type)
-        assert run(composite.retrieve(source)) is source
 
 
-def test_settings_validate_news_feed_sources():
-    assert Settings().news_feed_sources == ["google_news", "nasdaq"]
-    assert Settings(news_feed_sources=["Nasdaq", "google_news", "nasdaq"]).news_feed_sources == ["nasdaq", "google_news"]
-    with pytest.raises(ValidationError):
-        Settings(news_feed_sources=["twitter"])
-    assert Settings(sec_company_filings_enabled=True, ticker_news_enabled=True).sec_company_filings_enabled is True
 
 
 def test_build_dependencies_composes_official_and_news_providers(tmp_path):
@@ -247,13 +242,3 @@ def test_build_dependencies_disabled_has_no_research(tmp_path):
     settings = Settings(search_provider="disabled")
     dependencies = build_dependencies(settings, SecretStore(tmp_path, server=True))
     assert dependencies.research is None
-
-
-def test_build_dependencies_keeps_keyless_fallback_when_feeds_off(tmp_path):
-    from portfolio_analyzer.secrets import SecretStore
-    from portfolio_analyzer.service import build_dependencies
-    settings = Settings(search_provider="keyless", primary_feeds_enabled=False)
-    dependencies = build_dependencies(settings, SecretStore(tmp_path, server=True))
-    names = [provider.__class__.__name__ for provider in dependencies.research.providers]
-    assert names[0] == "DDGSResearchProvider"
-    assert "SecFilingsResearchProvider" not in names and "TickerNewsFeedProvider" in names

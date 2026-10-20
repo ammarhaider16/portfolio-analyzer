@@ -1,6 +1,7 @@
 "use strict";
 const $ = (selector) => document.querySelector(selector);
-let state = null, importDraft = null, selectedReport = null, lastAutoReport = null, pendingRunId = null;
+let state = null, importDraft = null, selectedReport = null, lastAutoReport = null, pendingRunId = null, currentReportRow = null;
+const runQuestions = new Map();
 const csrf = $('meta[name="csrf-token"]').content;
 function alertBox(selector) {
   const box = $(selector); if (!box) return null;
@@ -119,69 +120,56 @@ async function openReport(id, scroll=false) {
   catch(error) { if(selectedReport===id) $('#report-summary').textContent=`Could not load the summary: ${error.message}`; }
 }
 
-const NEWS_STATUS={verified:{label:'verified against the source',dot:'verified'},no_verified_update:{label:'no verified recent news',dot:'quiet'},discovery_only:{label:'headline only (not verified)',dot:'headline'},search_failed:{label:'news search failed',dot:'failed'},not_checked:{label:'not checked in this run',dot:'unchecked'}};
-function renderNewsLegend(news) {
-  const list=document.createElement('ul');list.className='news-legend';
-  for(const item of news.slice(0,20)){
-    const meta=NEWS_STATUS[item.status]||{label:'checked',dot:'quiet'};
-    const li=document.createElement('li');
-    const dot=document.createElement('span');dot.className=`news-dot ${meta.dot}`;dot.setAttribute('aria-hidden','true');
-    const symbol=document.createElement('strong');symbol.textContent=item.symbol||'Holding';
-    const label=document.createElement('span');
-    label.textContent=item.status==='verified'?(meta.label+(item.evidence_grade==='headline'?' · headline, not full text':item.evidence_grade==='full'?' · full-text source':'')):meta.label;
-    li.append(dot,symbol,label);list.append(li);
-  }
-  return list;
-}
 function renderReportSummary(row) {
-  const root=$('#report-summary');root.replaceChildren();
-  const result=row.result;if(!result){root.textContent='This report is still running.';$('#report-coverage').textContent='';return;}
-  $('#report-date').textContent=`Positions as of ${dateLabel(result.snapshot_as_of)}`;
-  const coverage=result.coverage||{};
-  $('#report-coverage').textContent=coverage.summary?`Research coverage: ${coverage.summary}`:'';
-  const summaryTitle=document.createElement('h3');summaryTitle.textContent='Briefing summary';
-  const summary=document.createElement('p');summary.className='briefing-summary';summary.textContent=briefingSummary(result);root.append(summaryTitle,summary);
-  const summaryLinks=document.createElement('div');summaryLinks.className='insight-sources';
-  for(const id of result.executive_summary?.evidence_ids||[]){const source=(result.sources||[]).find(item=>item.id===id);if(!source)continue;try{const url=new URL(source.url);if(!['http:','https:'].includes(url.protocol)||url.username)continue;const link=document.createElement('a');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';link.textContent=source.title||source.publisher||'Source';summaryLinks.append(link);}catch{}}
-  if(summaryLinks.childElementCount)root.append(summaryLinks);
-  const findings=(result.findings||[]).filter(item=>item.title!=='Portfolio overview').sort((a,b)=>Number(Boolean(b.evidence_ids?.length))-Number(Boolean(a.evidence_ids?.length))).slice(0,4);
-  const matter=document.createElement('h3');matter.textContent='What matters now';root.append(matter);
-  if(!findings.length){const empty=document.createElement('p');empty.className='insight-context';empty.textContent='No supported conclusion is available for this run. See what we could check below.';root.append(empty);}
-  const sources=new Map((result.sources||[]).map(source=>[source.id,source]));
-  const list=document.createElement('div');list.className='insight-list';
-  findings.forEach((finding,index)=>{const article=document.createElement('article');article.className='insight';const number=document.createElement('span');number.className='insight-number';number.textContent=String(index+1).padStart(2,'0');const body=document.createElement('div');const title=document.createElement('h3');title.textContent=finding.title;const detail=document.createElement('p');detail.textContent=finding.detail;body.append(title,detail);const context=[finding.event_date?`Event: ${finding.event_date}`:'',finding.affected_symbols?.length?`Affects: ${finding.affected_symbols.join(', ')}`:'',finding.portfolio_relevance||'',finding.uncertainty?`Limit: ${finding.uncertainty}`:''].filter(Boolean);for(const note of context){const p=document.createElement('p');p.className='insight-context';p.textContent=note;body.append(p);}const links=document.createElement('div');links.className='insight-sources';const ids=(finding.evidence_ids||[]).filter(id=>sources.has(id));ids.forEach((id,i)=>{const source=sources.get(id);try{const url=new URL(source.url);if(!['http:','https:'].includes(url.protocol))return;const anchor=document.createElement('a');anchor.href=url.href;anchor.target='_blank';anchor.rel='noopener noreferrer';anchor.textContent=source.title||source.publisher||`Source ${i+1}`;links.append(anchor);}catch{}});if(links.childElementCount)body.append(links);article.append(number,body);list.append(article);});
-  root.append(list);
-  const news=coverage.position_news||(result.metrics&&result.metrics.position_news)||[];
-  if(news.length){const newsTitle=document.createElement('h3');newsTitle.textContent='What we could check for each holding';root.append(newsTitle);root.append(renderNewsLegend(news));}
-  const issues=(coverage.issues||[]).filter(issue=>issue&&issue.message);
-  const nextTitle=document.createElement('h3');nextTitle.textContent='Data notes';root.append(nextTitle);
-  if(issues.length){const issueList=document.createElement('ul');issueList.className='coverage-issues';for(const issue of issues.slice(0,2)){const li=document.createElement('li');li.append(document.createTextNode(issue.message+' '));if(issue.action){const label=issue.action==='portfolio'?'Fix holdings':issue.action==='model'?'Set up a model':'Set up research';const go=button(label,()=>goToIssue(issue.action));go.type='button';li.append(go);}issueList.append(li);}root.append(issueList);if(issues.length>2){const extra=document.createElement('details');const summary=document.createElement('summary');summary.textContent=`${issues.length-2} more data notes`;extra.append(summary);for(const issue of issues.slice(2)){const note=document.createElement('p');note.textContent=issue.message;extra.append(note);}root.append(extra);}}
-  else {const positive=document.createElement('p');positive.className='insight-context';positive.textContent='No additional data notes were recorded for this run.';root.append(positive);}
+  currentReportRow=row;updateReportHeading();
+  $('#report-summary').replaceChildren();
+  $('#report-coverage').textContent='';
+  $('#report-date').textContent=row.result?.metrics?.price_session?`Prices for ${new Date(row.result.metrics.price_session+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})}`:'';
 }
-
-function briefingSummary(result) {
-  if(result.executive_summary?.text)return result.executive_summary.text;
-  const finding=(result.findings||[]).find(item=>item.evidence_ids?.length&&item.title!=='Portfolio overview');
-  if(finding)return finding.detail||finding.title;
-  const weights=Object.entries(result.metrics?.weights_pct||{}).filter(([,value])=>Number.isFinite(Number(value))).sort((a,b)=>Number(b[1])-Number(a[1]));
-  if(weights.length)return `${weights[0][0]} represents ${Number(weights[0][1]).toFixed(1)}% of the holdings and cash we could value. This run did not establish a sourced current-event conclusion.`;
-  return 'This run did not establish a supported current-event conclusion. Review research coverage and data notes for unchecked sources or incomplete research.';
+function friendlyEvent(event){
+  const verb={search_news:'Researching news',read_article:'Reading an article',get_market_data:'Checking market data',analyst:'Preparing your briefing'}[event.tool]||event.tool;
+  return `${verb}${event.symbol?' for '+event.symbol:''}${event.status==='failed'?' — lookup unavailable':event.status==='passed'||event.status==='completed'?' — done':''}`;
 }
-
+function rawEventLine(event){
+  const seconds=event.elapsed_seconds??(event.elapsed_ms===undefined?null:event.elapsed_ms/1000);
+  return [event.tool,event.asset||event.symbol,event.query,event.source,event.status,event.reason,
+    seconds===null?null:`${Number(seconds).toFixed(1)}s`].filter(Boolean).join(' · ');
+}
+function renderActivityPhases(events){
+  const root=$('#activity-phases');if(!root)return;root.replaceChildren();
+  for(const event of events.slice(-12)){const line=document.createElement('p');line.textContent=friendlyEvent(event);root.append(line);}
+}
 function renderResearchActivity(row) {
   const card=$('#research-activity');if(!card)return;
   const events=row?.research_activity||row?.result?.research_activity||[];
-  const budget=row?.research_budget||row?.result?.research_budget||{};
   card.hidden=!row;if(!row)return;
   $('#activity-status').textContent=`Run ${row.id?.slice(0,8)||''} · ${row.status||'complete'}`;
-  const labels={model_calls:'Model calls',tool_calls:'Tool calls',searches:'Discovery queries',elapsed_seconds:'Elapsed seconds',max_model_calls:'Model call limit',max_tool_calls:'Tool call limit',max_searches:'Query limit',max_seconds:'Time limit (seconds)'};
-  $('#activity-budget').textContent=Object.entries(budget).filter(([,value])=>typeof value==='number').map(([key,value])=>`${labels[key]||key.replaceAll('_',' ')}: ${Math.round(value*10)/10}`).join(' · ');
+  renderActivityPhases(events);
+  const empty=!events.length;
   const list=$('#activity-entries');list.replaceChildren();
-  if(!events.length){const entry=document.createElement('li');entry.textContent=['queued','running'].includes(row.status)?'Waiting for the first research tool result…':'No tool activity was recorded for this report.';list.append(entry);}
-  for(const event of events){const entry=document.createElement('li');const title=document.createElement('strong');title.textContent=event.tool||'Research tool';const detail=document.createElement('span');const seconds=event.elapsed_seconds??(event.elapsed_ms===undefined?null:event.elapsed_ms/1000);detail.textContent=[event.asset||event.symbol,event.query,event.source,event.status,seconds===null?null:`${Number(seconds).toFixed(1)}s`].filter(Boolean).join(' · ');entry.append(title,detail);list.append(entry);}
+  if(empty){const entry=document.createElement('li');entry.textContent=['queued','running'].includes(row.status)?'Waiting for the first research tool result…':'No tool activity was recorded for this report.';list.append(entry);}
+  for(const event of events){const entry=document.createElement('li');entry.textContent=rawEventLine(event);list.append(entry);}
 }
 
 function goToIssue(actionName){if(actionName==='portfolio'){view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});return;}view('connections');$('#research-setup').open=true;$('#research-setup').scrollIntoView({behavior:'smooth'});}
+
+const READINESS_GRADES={ok:{label:'Ready',cls:'readiness-ok'},weak:{label:'Weak',cls:'readiness-weak'},fail:{label:'Not ready',cls:'readiness-fail'}};
+function readinessLine(name,grade){const meta=READINESS_GRADES[grade]||READINESS_GRADES.fail;return {text:`${name}: ${meta.label}`,cls:meta.cls};}
+function renderReadiness(result) {
+  const box=$('#readiness-state');if(!box)return;
+  box.hidden=false;box.replaceChildren();
+  if(!result){const pending=document.createElement('p');pending.className='readiness-detail';pending.textContent='Checking tool calling and structured output…';box.append(pending);return;}
+  for(const [name,grade] of [['Tool calling',result.tool_calling],['Structured output',result.structured_output]]){
+    const line=readinessLine(name,grade);
+    const span=document.createElement('span');span.className=`readiness-grade ${line.cls}`;span.textContent=line.text;box.append(span);
+  }
+  const detail=document.createElement('p');detail.className='readiness-detail';detail.textContent=String(result.detail||'');box.append(detail);
+}
+function renderReadinessError(message) {
+  const box=$('#readiness-state');if(!box)return;
+  box.hidden=false;box.replaceChildren();
+  const error=document.createElement('p');error.className='readiness-grade readiness-fail';error.textContent=String(message||'');box.append(error);
+}
 
 let portfolioDirty = false, editorSnapshot = null, editorVersion = null, activeImportSource = null;
 let pricesBySymbol = new Map(), pricesAsOf = null;
@@ -220,7 +208,7 @@ function addHolding(position={}) {
   priceText.title='Price updates automatically from market data. Enter ticker and shares.';
   priceText.setAttribute('aria-label',`Price for ${position.symbol || 'holding'}: ${formatPrice(priceValue)}`);
   priceCell.append(priceText);row.append(priceCell);
-  if(position.symbol && priceValue!==null && priceValue!==undefined && priceValue!=='') pricesBySymbol.set(position.symbol.toUpperCase(),{price:priceValue,previous_close:position.previous_close ?? pricesBySymbol.get(position.symbol)?.previous_close});
+  if(position.symbol && priceValue!==null && priceValue!==undefined && priceValue!=='') pricesBySymbol.set(position.symbol.toUpperCase(),{...pricesBySymbol.get(position.symbol),...position,price:priceValue,previous_close:position.previous_close ?? pricesBySymbol.get(position.symbol)?.previous_close});
   const symbolCell=row.firstElementChild;const details=document.createElement('details');details.className='instrument-details';const summary=document.createElement('summary');summary.textContent='Instrument details';details.append(summary);
   const typeLabel=document.createElement('label');typeLabel.textContent='Type';const type=document.createElement('select');type.dataset.field='asset_type';type.setAttribute('aria-label','Instrument type');for(const [value,text] of [['unknown','Unknown'],['stock','Stock'],['etf','ETF'],['fund','Fund'],['mutual_fund','Mutual fund'],['bond','Bond'],['cash','Cash'],['other','Other']]){const option=document.createElement('option');option.value=value;option.textContent=text;type.append(option);}type.value=position.asset_type || 'unknown';if(!type.value){const option=document.createElement('option');option.value=position.asset_type;option.textContent=position.asset_type;type.append(option);type.value=position.asset_type;}type.addEventListener('change',markPortfolioDirty);typeLabel.append(type);details.append(typeLabel);
   for(const [name,label] of [['instrument_name','Instrument name'],['exchange','Exchange'],['sector','Sector']]){const fieldLabel=document.createElement('label');fieldLabel.textContent=label;const input=document.createElement('input');input.dataset.field=name;input.value=position[name]??'';input.addEventListener('input',markPortfolioDirty);fieldLabel.append(input);details.append(fieldLabel);}symbolCell.append(details);
@@ -244,7 +232,7 @@ function relativeTime(value){
 function priceNote(){ return `Prices update automatically; last updated ${pricesAsOf?relativeTime(pricesAsOf):'when market data arrives'}.`; }
 function updatePricesLabel(){ const label=$('#prices-updated'); if(label) label.textContent=pricesAsOf?`Prices updated ${relativeTime(pricesAsOf)}`:'Prices update automatically'; }
 function applyQuotes(prices){
-  const update=(positions)=>{for(const position of positions||[]){const quote=prices[position.symbol];if(quote&&quote.price!==null&&quote.price!==undefined){position.price=quote.price;if(quote.previous_close!==null&&quote.previous_close!==undefined)position.previous_close=quote.previous_close;pricesBySymbol.set(position.symbol,{price:quote.price,previous_close:position.previous_close});}}};
+  const update=(positions)=>{for(const position of positions||[]){const quote=prices[position.symbol];if(quote&&quote.price!==null&&quote.price!==undefined){position.price=quote.price;position.previous_close=quote.previous_close??null;position.price_as_of=quote.price_as_of||null;position.price_session=quote.price_session||quote.trading_date||null;position.price_source=quote.price_source||quote.source||null;pricesBySymbol.set(position.symbol,{...quote,price:quote.price,previous_close:position.previous_close});}}};
   update(editorSnapshot?.positions);update(state?.snapshot?.positions);
   for(const row of $('#holdings-rows').children){
     const symbol=[...row.querySelectorAll('input,select')].find(field=>field.dataset.field==='symbol')?.value.trim().toUpperCase();
@@ -256,7 +244,7 @@ function loadPortfolio(snapshot, draft=false) {
   editorSnapshot=snapshot ? structuredClone(snapshot) : {as_of:new Date().toISOString(),positions:[],cash:'0',source:'manual',account_id:'manual',unsupported:[]};
   activeImportSource=draft?(snapshot?.source==='image'?'Screenshot':'CSV'):null;
   pricesBySymbol=new Map();
-  for(const position of editorSnapshot.positions||[]) pricesBySymbol.set(position.symbol,{price:priceValue(position.price),previous_close:priceValue(position.previous_close)});
+  for(const position of editorSnapshot.positions||[]) pricesBySymbol.set(position.symbol,{...position,price:priceValue(position.price),previous_close:priceValue(position.previous_close)});
   $('#holdings-rows').replaceChildren();for(const position of editorSnapshot.positions) addHolding(position);
   $('#portfolio-date').value=localDate(editorSnapshot.as_of);$('#portfolio-cash').value=editorSnapshot.cash ?? '';
   portfolioDirty=draft; editorVersion=editableProjection(snapshot);
@@ -272,7 +260,7 @@ function collectPortfolio() {
     if(!/^[A-Z0-9.\-^=/]{1,40}$/.test(data.symbol)) throw new Error('Provide a valid symbol for every holding.');
     if(seen.has(data.symbol) && !['CASH','USD'].includes(data.symbol) && data.asset_type.toLowerCase()!=='cash') throw new Error(`Duplicate symbol ${data.symbol}; combine lots first.`);
     seen.add(data.symbol);const saved=pricesBySymbol.get(data.symbol)||{};
-    data.quantity=amount(data.quantity,`${data.symbol} shares`);data.price=priceValue(saved.price);data.previous_close=priceValue(saved.previous_close);
+    data.quantity=amount(data.quantity,`${data.symbol} shares`);data.price=priceValue(saved.price);data.previous_close=priceValue(saved.previous_close);data.price_as_of=saved.price_as_of||null;data.price_session=saved.price_session||null;data.price_source=saved.price_source||null;
     data.sector=data.sector||null;data.asset_type=(data.asset_type||'unknown').toLowerCase();positions.push(data);
   }
   const date=new Date($('#portfolio-date').value);if(!Number.isFinite(date.getTime())) throw new Error('Provide a snapshot date and time.');
@@ -326,7 +314,7 @@ function updateResearchReadiness() {
   $('#cap-events').textContent=!searchConfigured?'Unavailable · set up search':testedWorkingSources?`${testedWorkingSources} sources available${tests.search.status==='partial'?' · some sources need attention':''}`:tests.search?.status==='failed'||tests.search?.status==='partial'?'No tested source available · review source checks':'Search configured · test it';
   $('#cap-model').textContent=!modelConfigured?'Unavailable · add a model':tests.model?.status==='passed'?`Model tested ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?'Model test failed · retry':'Model configured · test it';
   $('#model-test-state').textContent=tests.model?.status==='passed'?`Last test passed ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?`Last test failed ${dateLabel(tests.model.tested_at)}`:'Connection not tested';
-  $('#search-test-state').textContent=sourceTests?`Source checks ${dateLabel(tests.search.tested_at)} · see individual outcomes`:tests.search?`Legacy aggregate test: ${tests.search.status}. Retest to check each source.`:'Sources not tested';
+  $('#search-test-state').textContent=sourceTests?`Source checks ${dateLabel(tests.search.tested_at)} · see individual outcomes`:'Sources not tested';
   const chips=$('#source-states');chips.replaceChildren();
   const enabled=settings.search_provider!=='disabled';
   const sourceSettings={search:enabled,fed:enabled&&settings.primary_feeds_enabled,sec_filings:enabled&&settings.sec_company_filings_enabled,google_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('google_news'),nasdaq:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('nasdaq'),bing_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('bing_news')};
@@ -371,6 +359,30 @@ function setMailProvider(preserve=false) {
   else help.innerHTML='Enter the SMTP details from your mail provider. Outlook.com requires OAuth2, which this password-based setup does not support. <a href="https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com" target="_blank" rel="noopener noreferrer">Outlook.com requirements</a>.';
 }
 
+const NARRATIVE_BADGES={available:{text:'Briefing ready',cls:'state-written'},not_written:{text:'Briefing incomplete · retry',cls:'state-retry',retry:true},unavailable:{text:'Analyst unavailable',cls:'state-retry'},not_applicable:{text:'No analysis needed',cls:'state-written'}};
+function outcomeBadge(row){
+  const status=row&&row.status;
+  if(status==='queued')return {text:'Queued',cls:'state-queued'};
+  if(status==='running')return {text:'Running',cls:'state-running'};
+  if(status==='failed')return {text:'Failed',cls:'state-failed'};
+  const known=NARRATIVE_BADGES[row&&row.narrative_state];
+  if(known)return {text:known.text,cls:known.cls,retry:Boolean(known.retry)};
+  return (row&&row.analysis_written===false)
+    ? {text:'Briefing incomplete · retry',cls:'state-retry',retry:true}
+    : {text:'Briefing ready',cls:'state-written'};
+}
+function runActive(){return Boolean(state&&Array.isArray(state.history)&&state.history.some(row=>['queued','running'].includes(row.status)));}
+function reportHeadingText(row,active){if(active&&row&&row.created_at)return `Previous briefing (${dateLabel(row.created_at)})`;return 'Latest briefing';}
+function updateReportHeading(){const el=$('#report-heading');if(el)el.textContent=reportHeadingText(currentReportRow,runActive());}
+function focusRunButton(){
+  const control=$('#run-button');if(!control)return;
+  const card=control.closest&&control.closest('.research-card');
+  if(card&&card.scrollIntoView)card.scrollIntoView({behavior:'smooth',block:'center'});
+  else if(control.scrollIntoView)control.scrollIntoView({behavior:'smooth',block:'center'});
+  if(control.classList)control.classList.add('run-highlight');
+  if(control.focus)control.focus();
+  setTimeout(()=>{if(control.classList)control.classList.remove('run-highlight');},6000);
+}
 const historySignatures=new Map();
 function historyItem(row) {
   const item=document.createElement('div'); item.className='history-row';
@@ -379,8 +391,9 @@ function historyItem(row) {
   if(row.delivery) detail.textContent+=` · Email: ${row.delivery}`;
   info.append(title,detail);
   const actions=document.createElement('div'); actions.className='history-actions';
-  const badge=document.createElement('span'); badge.className=`badge ${row.status}`; badge.textContent=({queued:'Queued',running:'Running',failed:'Failed',partial:'Review coverage',success:'Ready'})[row.status]||row.status; actions.append(badge);
+  const badge=document.createElement('span'); const outcome=outcomeBadge(row); badge.className=`badge ${row.status} ${outcome.cls}`; badge.textContent=outcome.text; actions.append(badge);
   if(row.summary&&!row.error)detail.textContent=row.summary;
+  if(outcome.retry) actions.append(button('Run again',()=>{focusRunButton();}));
   if(['queued','running'].includes(row.status)) actions.append(button('Cancel', async()=>{await api(`/api/runs/${row.id}/cancel`,{}); await refresh();}));
   else {
     if(row.status!=='failed') actions.append(button('Read report →',()=>openReport(row.id,true)));
@@ -393,7 +406,7 @@ function historyItem(row) {
   }
   item.append(info,actions); return item;
 }
-function historySignature(row){return JSON.stringify([row.status,row.summary,row.error,row.delivery,row.created_at,row.schedule_key]);}
+function historySignature(row){return JSON.stringify([row.status,row.summary,row.error,row.delivery,row.created_at,row.schedule_key,row.narrative_state,row.analysis_written,row.section_titles]);}
 function renderHistory(rows) {
   // Reconcile by id so a 4-second poll does not rebuild (and steal focus from) unchanged rows.
   const container=$('#history');
@@ -447,7 +460,7 @@ async function refresh(populate=false) {
     const mail=s.smtp;const mailProvider=mail?.host==='smtp.gmail.com'?'gmail':mail?.host==='smtp.mail.me.com'?'icloud':mail?'custom':'gmail';$('#mail-provider').value=mailProvider;setMailProvider(true);
     const now=new Date(); now.setMinutes(now.getMinutes()-now.getTimezoneOffset()); $('#import-form').elements.as_of.value=now.toISOString().slice(0,16); $('#image-form').elements.as_of.value=now.toISOString().slice(0,16);
     const managed=state.externally_managed;
-    const nested={model:['#model-form',['provider','model','base_url','temperature','max_tokens']],schedule:['#schedule-form',['enabled','delay_minutes','timezone']],smtp:['#email-form',['host','port','username','sender','recipient','tls_mode','plain_text_only','percent_only']]};
+     const nested={model:['#model-form',['provider','model','write_model','base_url','temperature','max_tokens']],schedule:['#schedule-form',['enabled','delay_minutes','timezone']],smtp:['#email-form',['host','port','username','sender','recipient','tls_mode','plain_text_only','percent_only']]};
     for(const key of managed) {
       if(nested[key]) {const [form,names]=nested[key];for(const name of names) $(form).elements.namedItem(name).disabled=true;}
       else {const selectorName=key==='model_enabled'?'enabled':key;const form=key==='model_enabled'?$('#model-form'):null;document.querySelectorAll(`[name="${selectorName}"]`).forEach(element=>{if(!form||form.contains(element))element.disabled=true;});}
@@ -458,6 +471,7 @@ async function refresh(populate=false) {
   updateSecAvailability();
   renderSecretStorage();
   renderHistory(state.history);
+  updateReportHeading();
   const activityRun=state.history.find(row=>['queued','running'].includes(row.status))||state.history.find(row=>row.id===selectedReport)||latest;
   if(activityRun){try{renderResearchActivity(await api(`/api/runs/${encodeURIComponent(activityRun.id)}`));}catch{$('#activity-status').textContent='Activity temporarily unavailable; retrying on the next refresh.';}}
   if(latest && ['success','partial'].includes(latest.status) && latest.id!==lastAutoReport && !selectedReport) {openReport(latest.id); lastAutoReport=latest.id;}
@@ -564,7 +578,7 @@ if($('#login-form')) {
   $('#run-form').addEventListener('submit',action(async()=>{
     if(portfolioDirty) {view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});throw new Error('Save or discard your portfolio edits before starting a briefing.');}
     const data=values('#run-form'); data.include_suggestions=checked('#run-form','include_suggestions'); data.send_email=checked('#run-form','send_email');
-    const run=await api('/api/runs',data);pendingRunId=run.run_id;selectedReport=null;$('#run-form').elements.include_suggestions.checked=false;
+    const run=await api('/api/runs',data);pendingRunId=run.run_id;runQuestions.set(run.run_id,String(data.question||''));selectedReport=null;$('#run-form').elements.include_suggestions.checked=false;
     notice('Research started. Your report will appear here.'); await refresh();
   }));
   $('#import-form').addEventListener('submit',action(async()=>{
@@ -610,7 +624,7 @@ if($('#login-form')) {
   $('#model-form').addEventListener('submit',action(async()=>{
     const data=values('#model-form'), key=(data.key||'').trim();
     // Validate/persist settings first; only then store the key, and only then clear the field.
-    await save({model:{provider:data.provider,model:data.model,base_url:data.base_url,temperature:Number(data.temperature),max_tokens:Number(data.max_tokens)},model_enabled:checked('#model-form','enabled')},true);
+    await save({model:{provider:data.provider,model:data.model,write_model:(data.write_model||'').trim()||null,base_url:data.base_url,temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),request_timeout_seconds:Number(data.request_timeout_seconds)},model_enabled:checked('#model-form','enabled')},true);
     if(key){await api('/api/secrets/model_api_key',{value:key});const input=$('#model-form').elements.key;input.value='';input.dataset.editing='false';await refresh();}
     notice('Model settings saved.');
   }));
@@ -621,7 +635,16 @@ if($('#login-form')) {
     if(data.search_provider==='tavily'&&tavily){await api('/api/secrets/tavily_api_key',{value:tavily});const input=$('#research-form').elements.key;input.value='';input.dataset.editing='false';}
     await refresh(); notice('Research settings saved.');
   }));
-  document.querySelectorAll('[data-test]').forEach(el=>el.addEventListener('click',action(async()=>{el.disabled=true;notice('Testing the saved connection…');try{const result=await api(`/api/test/${el.dataset.test}`,{});notice(result.message);}finally{el.disabled=false;await refresh();}})));
+  document.querySelectorAll('[data-test]:not([data-test="model-readiness"])').forEach(el=>el.addEventListener('click',action(async()=>{el.disabled=true;notice('Testing the saved connection…');try{const result=await api(`/api/test/${el.dataset.test}`,{});notice(result.message);}finally{el.disabled=false;await refresh();}})));
+  const readinessButton=$('[data-test="model-readiness"]');
+  if(readinessButton)readinessButton.addEventListener('click',action(async()=>{
+    readinessButton.disabled=true;renderReadiness(null);
+    try{
+      const value=$('#model-form').elements.key.value.trim();
+      renderReadiness(await api('/api/model/readiness',value?{value}:{}));
+    }catch(error){renderReadinessError(error.message);}
+    finally{readinessButton.disabled=false;}
+  }));
   $('#research-form').elements.search_provider.addEventListener('change',()=>{$('#tavily-fields').hidden=$('#research-form').elements.search_provider.value!=='tavily';});
   $('#research-form').elements.sec_company_filings_enabled.addEventListener('change',event=>{event.target.dataset.userSelected='true';updateSecAvailability();});
   $('#research-form').elements.sec_contact.addEventListener('input',event=>{
@@ -630,7 +653,7 @@ if($('#login-form')) {
     updateSecAvailability();
   });
   $('#research-form').elements.ticker_news_enabled.addEventListener('change',()=>{$('#news-source-fields').hidden=!checked('#research-form','ticker_news_enabled');});
-  $('#preferences-form').addEventListener('submit',action(async()=>{const data=values('#preferences-form');for(const key of ['position_review_threshold_pct','sector_review_threshold_pct','max_searches','max_model_calls','max_tool_calls','max_seconds','max_data_age_hours','retention_days']) data[key]=Number(data[key]);await save(data);}));
+  $('#preferences-form').addEventListener('submit',action(async()=>{const data=values('#preferences-form');for(const key of ['position_review_threshold_pct','sector_review_threshold_pct','retention_days']) data[key]=Number(data[key]);await save(data);}));
   $('#profile-form').addEventListener('submit',action(async()=>{const data=values('#profile-form');let targets={};try{targets=data.allocation_targets.trim()?JSON.parse(data.allocation_targets):{};}catch{throw new Error('Other targets must be a JSON object, for example {"real_estate":10}.');}if(!targets||Array.isArray(targets)||typeof targets!=='object')throw new Error('Other targets must be a JSON object.');for(const name of ['stocks','bonds','cash']){const raw=data[`target_${name}`].trim();delete data[`target_${name}`];if(raw)targets[name]=Number(raw);}if(!Object.keys(targets).length||Object.values(targets).some(value=>!Number.isFinite(value)||value<0||value>100)||Object.values(targets).reduce((sum,value)=>sum+value,0)>100)throw new Error('Enter targets between 0% and 100% that total no more than 100%.');data.allocation_targets=targets;data.restrictions=data.restrictions.split('\n').map(s=>s.trim()).filter(Boolean);await save({investment_profile:data});}));
   $('#mail-provider').addEventListener('change',()=>setMailProvider());
   $('#email-form').addEventListener('submit',action(async()=>{

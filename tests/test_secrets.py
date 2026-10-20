@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from portfolio_analyzer.config import ModelConfig, Settings
 from portfolio_analyzer.secrets import SecretStore, SecretStorageError
-from portfolio_analyzer.service import MODEL_PROVIDER_SLOTS, read_secret, resolve_model_key, resolve_secret
+from portfolio_analyzer.service import MODEL_PROVIDER_SLOTS, resolve_model_key, resolve_secret
 
 
 class FakeKeyring:
@@ -91,12 +91,11 @@ def test_per_provider_slots_resolve_independently(keyring_store):
     assert resolve_model_key(anthropic, store)[0] is None
 
 
-def test_legacy_model_slot_remains_readable(keyring_store):
+def test_shared_model_slot_does_not_supply_other_providers(keyring_store):
     store, _ = keyring_store
     store.set('model_api_key', 'legacy-secret')
     settings = Settings(model=ModelConfig(provider='openai', model='gpt', base_url='https://api.openai.com/v1'))
-    assert resolve_model_key(settings, store) == ('legacy-secret', 'keyring', 'model_api_key')
-    assert read_secret(store, 'model_api_key') == 'legacy-secret'
+    assert resolve_model_key(settings, store) == (None, None, 'model_api_key_openai')
 
 
 def test_keyring_overrides_provider_alias(keyring_store, monkeypatch):

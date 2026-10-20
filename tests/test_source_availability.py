@@ -24,13 +24,10 @@ def test_contact_defaults_and_validation():
         assert error.value.errors()[0]["loc"] == ("sec_contact",)
 
 
-def test_invalid_legacy_contact_is_visible_but_gated(tmp_path):
+def test_saved_invalid_contact_is_rejected(tmp_path):
     (tmp_path / "settings.json").write_text(json.dumps({"sec_contact": "John", "sec_company_filings_enabled": True}))
-    settings = load_settings(tmp_path)
-    assert settings.sec_contact == "John"
-    provider = SecFilingsResearchProvider(settings.sec_contact)
-    assert not provider._enabled()
-    assert source_diagnostics(provider)["sec_filings"]["status"] == "skipped"
+    with pytest.raises(ValidationError):
+        load_settings(tmp_path)
 
 
 @pytest.mark.parametrize("host", ["sec.gov", "www.sec.gov", "data.sec.gov", "SEC.GOV."])
@@ -255,5 +252,3 @@ def test_source_registry_supports_independent_tool_selection():
     assert registry["nasdaq"].sources == ("nasdaq",)
     assert not supports_market_wide(registry["nasdaq"])
     assert registry["fed"].source_outcomes is official.source_outcomes
-
-

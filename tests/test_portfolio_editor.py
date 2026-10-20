@@ -14,6 +14,54 @@ from portfolio_analyzer.models import PortfolioSnapshot, Position
 from portfolio_analyzer.web import create_app
 
 
+NODE_FALLBACK = Path('/mnt/c/Program Files/nodejs/node.exe')
+
+
+def find_node():
+    """Node on PATH, or the known Windows install reached from WSL."""
+    node = shutil.which('node')
+    if node:
+        return node, lambda path: path
+    if NODE_FALLBACK.exists():
+        return str(NODE_FALLBACK), lambda path: str(path).replace('/mnt/c/', 'C:\\').replace('/', '\\')
+    return None, lambda path: path
+
+
+def run_js(harness):
+    node, to_node_path = find_node()
+    if not node:
+        pytest.skip('Node is required to exercise browser JavaScript')
+    script = Path(__file__).parents[1] / 'src/portfolio_analyzer/static/app.js'
+    result = subprocess.run([node, '-e', harness, to_node_path(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+DOM_HARNESS = r'''
+const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
+class Element {
+  constructor(){this.children=[];this.dataset={};this.handlers={};this.value='';this.content='csrf';this._text='';this.className='';this.classList={add(){},remove(){},toggle(){}};}
+  append(...items){for(const item of items){item.parent=this;this.children.push(item);}}
+  replaceChildren(){this.children=[];}
+  setAttribute(){}
+  addEventListener(name,callback){this.handlers[name]=callback;}
+  remove(){if(this.parent)this.parent.children=this.parent.children.filter(child=>child!==this);}
+  get firstElementChild(){return this.children[0];}
+  get childElementCount(){return this.children.length;}
+  querySelectorAll(){return [];}
+  closest(){return null;}
+  focus(){}
+  scrollIntoView(){}
+  get textContent(){return textOf(this);}
+  set textContent(value){this._text=String(value);this.children=[];}
+}
+function textOf(el){return [el._text||'',...el.children.map(textOf)].filter(Boolean).join(' ');}
+function nodesOf(root,acc=[]){acc.push({className:root.className||'',text:(root._text||'')});for(const child of root.children)nodesOf(child,acc);return acc;}
+const elements=new Map();
+global.document={querySelector(selector){if(!elements.has(selector)) elements.set(selector,new Element());return elements.get(selector);},querySelectorAll(){return [];},createElement(){return new Element();}};
+vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8').split('async function refresh(')[0]);
+'''
+
+
 def test_editor_normalizes_cash_and_preserves_missing_prices():
     snapshot = PortfolioSnapshot(as_of=datetime.now(timezone.utc), cash='5', positions=[
         Position(symbol='ABC', quantity='2'), Position(symbol='CASH', quantity='20'),
@@ -80,10 +128,6 @@ def test_invalid_editor_input_does_not_save(tmp_path, change):
 
 def test_editor_javascript_preserves_draft_and_validates_amounts():
     """Execute the shipped editor functions with a small DOM adapter."""
-    node = shutil.which('node')
-    if not node:
-        pytest.skip('Node is required to exercise browser JavaScript')
-    script = Path(__file__).parents[1] / 'src/portfolio_analyzer/static/app.js'
     harness = r'''
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 class Element {
@@ -128,8 +172,7 @@ const firstRow=document.querySelector('#holdings-rows').children[0];
 assert.equal(firstRow.querySelectorAll().some(field=>field.dataset.field==='price'),false);
 assert.ok(firstRow.children[2].children[0].textContent.includes('42.50'));
 '''
-    result = subprocess.run([node, '-e', harness, str(script)], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    run_js(harness)
 
 
 def test_settings_validation_returns_named_fields(tmp_path):
@@ -143,52 +186,3 @@ def test_settings_validation_returns_named_fields(tmp_path):
         assert all(entry['message'] for entry in errors)
         # The submitted value is never echoed back to the browser.
         assert '999' not in response.text
-
-
-def test_dashboard_javascript_compacts_long_amounts_and_routes_views():
-    node = shutil.which('node')
-    if not node:
-        pytest.skip('Node is required to exercise browser JavaScript')
-    script = Path(__file__).parents[1] / 'src/portfolio_analyzer/static/app.js'
-    harness = r'''
-const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
-class Element {
-  constructor(){this.children=[];this.dataset={};this.handlers={};this.value='';this.content='csrf';this._text='';}
-  append(...items){for(const item of items){item.parent=this;this.children.push(item);}}
-  replaceChildren(){this.children=[];}
-  setAttribute(){}
-  addEventListener(name,callback){this.handlers[name]=callback;}
-  remove(){}
-  get firstElementChild(){return this.children[0];}
-  querySelectorAll(){return [];}
-  get textContent(){return this._text;}
-  set textContent(value){this._text=value;}
-}
-const elements=new Map();
-global.document={querySelector(selector){if(!elements.has(selector)) elements.set(selector,new Element());return elements.get(selector);},querySelectorAll(){return [];},createElement(){return new Element();}};
-vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8').split('async function refresh(')[0]);
-// Ordinary amounts stay exact; long amounts compact but keep the exact figure.
-const short=displayFigure(3745.67);
-assert.equal(short.text, short.exact);
-assert.equal(short.text, exactMoney(3745.67));
-const long=displayFigure(1234567.89);
-assert.notEqual(long.text, long.exact);
-assert.ok(long.exact.length>9);
-assert.ok(long.text.length<long.exact.length);
-assert.equal(long.exact, exactMoney(1234567.89));
-assert.ok(compactFigure(1234567.89).length < exactMoney(1234567.89).length);
-// Hash routes map to the addressable views.
-assert.equal(viewFromHash('#portfolio'),'desk');
-assert.equal(viewFromHash('#connections'),'connections');
-assert.equal(viewFromHash('#preferences'),'preferences');
-assert.equal(viewFromHash('#automation'),'automation');
-assert.equal(viewFromHash('#portfolio-editor'),null);
-assert.equal(VIEW_ROUTES.desk,'portfolio');
-assert.equal(VIEW_ROUTES.automation,'automation');
-// News legend reads clearly for every status the engine can emit.
-for(const status of ['verified','discovery_only','no_verified_update','search_failed','not_checked']) assert.ok(NEWS_STATUS[status], status);
-assert.equal(NEWS_STATUS.verified.dot,'verified');
-assert.ok(NEWS_STATUS.discovery_only.label.includes('headline only (not verified)'));
-'''
-    result = subprocess.run([node, '-e', harness, str(script)], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr

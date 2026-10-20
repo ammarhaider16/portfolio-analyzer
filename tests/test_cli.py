@@ -10,8 +10,8 @@ def test_offline_cli_without_credentials(tmp_path):
     completed = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
-    assert result["schema_version"] == "1.0"
-    assert result["status"] == "partial"
+    assert result["schema_version"] == "2.0"
+    assert result["status"] == "success"
     assert result["metrics"]["known_value"] == "19450"
     assert result["suggestions"] == []
     assert any("DEMONSTRATION PORTFOLIO" in warning for warning in result["warnings"])

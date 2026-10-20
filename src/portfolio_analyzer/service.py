@@ -1,6 +1,7 @@
 """Application orchestration around the independently reusable research engine."""
 import asyncio
 import hashlib
+import json
 import os
 import secrets as random_secrets
 from datetime import datetime, timedelta, timezone
@@ -39,8 +40,40 @@ MODEL_PROVIDER_ALIASES = {
 SECRET_ALIASES = {
     "tavily_api_key": ("TAVILY_API_KEY",),
 }
-# The shared pre-Phase-3 name, kept readable only to migrate existing installs.
-LEGACY_MODEL_SLOT = "model_api_key"
+# Virtual dashboard key; persisted credentials always use a provider-specific slot.
+ACTIVE_MODEL_KEY = "model_api_key"
+
+
+def safe_error_reason(exc, secret=None):
+    """A short, secret-free category describing why a provider call failed."""
+    from pydantic import ValidationError
+    if isinstance(exc, ValidationError):
+        return "the model returned an invalid briefing shape; check structured tool-output support"
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 401:
+        return "the endpoint rejected the API key (HTTP 401). Check that the key belongs to the selected provider"
+    if status == 403:
+        return "the endpoint refused access (HTTP 403). Check the key's permissions and model access"
+    if status == 404:
+        return "the endpoint or model was not found (HTTP 404). Check the base URL and model identifier"
+    if status == 429:
+        return "the provider rate limit was reached (HTTP 429)"
+    if status == 400:
+        body = getattr(exc, "body", {})
+        item = body.get("error", body) if isinstance(body, dict) else {}
+        parameter = item.get("param") if isinstance(item, dict) else None
+        if parameter in {"temperature", "max_tokens", "max_completion_tokens", "reasoning_effort"}:
+            return f"the model rejected the {parameter} setting; adjust advanced model settings"
+        if isinstance(parameter, str) and parameter.startswith(("tools", "response_format")):
+            return "the endpoint rejected the research tool schema; choose a model supporting function tools"
+        return "the endpoint rejected the research request (HTTP 400); check model capabilities and settings"
+    if isinstance(status, int) and status >= 500:
+        return f"the provider returned a server error (HTTP {status})"
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timeout" in type(exc).__name__.lower():
+        return "the provider request timed out; check the connection and retry"
+    return "the provider request failed; check the selected model, credentials, and connection"
 
 
 def _read_stored(store, name):
@@ -85,22 +118,13 @@ def resolve_secret(store, name, aliases=()):
 
 def read_secret(store, name):
     """Return only the resolved value for a secret (thin wrapper over ``resolve_secret``)."""
-    if name == LEGACY_MODEL_SLOT:
-        # Diagnostic helper (CLI): report where any model credential lives.
-        for provider, slot in MODEL_PROVIDER_SLOTS.items():
-            value, _ = resolve_secret(store, slot, MODEL_PROVIDER_ALIASES.get(provider, ()))
-            if value:
-                return value
-        return resolve_secret(store, LEGACY_MODEL_SLOT, ("LITELLM_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"))[0]
     return resolve_secret(store, name, SECRET_ALIASES.get(name, ()))[0]
 
 
 def resolve_model_key(settings, secret_store):
     """Resolve the model key for the selected provider only.
 
-    The active provider's dedicated slot (and its documented alias) is checked
-    first, then the legacy shared ``model_api_key`` for migration. Switching
-    provider therefore never silently reuses another provider's stored key.
+    Only the active provider's dedicated slot and documented alias are checked.
     Returns ``(value, source, used_name)``.
     """
     provider = settings.model.provider
@@ -108,9 +132,6 @@ def resolve_model_key(settings, secret_store):
     value, source = resolve_secret(secret_store, slot, MODEL_PROVIDER_ALIASES.get(provider, ()))
     if value:
         return value, source, slot
-    value, source = resolve_secret(secret_store, LEGACY_MODEL_SLOT)
-    if value:
-        return value, source, LEGACY_MODEL_SLOT
     return None, None, slot
 
 
@@ -118,7 +139,6 @@ def model_env_names(provider):
     """The exact environment variable names honored for a provider's key."""
     names = ["PORTFOLIO_SECRET_" + MODEL_PROVIDER_SLOTS[provider].upper()]
     names.extend(MODEL_PROVIDER_ALIASES.get(provider, ()))
-    names.append("PORTFOLIO_SECRET_MODEL_API_KEY")
     return list(dict.fromkeys(names))
 
 
@@ -157,8 +177,8 @@ def secret_status(settings, store, server=False):
         secrets[slot] = describe_secret(store, slot, resolved, provider=provider, saved_at_name=slot,
                                         env_names=model_env_names(provider), aliases=aliases, server=server)
     value, source, used = resolve_model_key(settings, store)
-    active_aliases = MODEL_PROVIDER_ALIASES.get(settings.model.provider, ()) if used != LEGACY_MODEL_SLOT else ()
-    secrets[LEGACY_MODEL_SLOT] = describe_secret(store, used, (value, source), provider=settings.model.provider,
+    active_aliases = MODEL_PROVIDER_ALIASES.get(settings.model.provider, ())
+    secrets[ACTIVE_MODEL_KEY] = describe_secret(store, used, (value, source), provider=settings.model.provider,
                                                  saved_at_name=used, env_names=model_env_names(settings.model.provider),
                                                  aliases=active_aliases, server=server)
     for name in ("tavily_api_key", "smtp_password"):
@@ -169,23 +189,20 @@ def secret_status(settings, store, server=False):
     return secrets
 
 
-def create_model(settings, secret_store, api_key=None):
+def create_model(settings, secret_store, api_key=None, model_name=None):
     key = api_key
     if key is None:
         key, _source, _used = resolve_model_key(settings, secret_store)
     if not key:
         raise ValueError("Add a model API key or configure its environment variable")
     cfg = settings.model
-    # Honor the endpoint the owner configured; fall back to the provider default when blank.
-    provider_defaults = {"colgate": "https://litellm.colgate.edu",
-                         "openai": "https://api.openai.com/v1",
-                         "anthropic": "https://api.anthropic.com"}
-    base = (cfg.base_url or provider_defaults.get(cfg.provider, "")).rstrip("/")
+    selected_model = model_name if model_name is not None else cfg.model
+    base = cfg.base_url
     if cfg.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=cfg.model, api_key=key, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=30, max_retries=1)
+        return ChatAnthropic(model=selected_model, api_key=key, base_url=base, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=cfg.request_timeout_seconds, max_retries=0)
     from langchain_openai import ChatOpenAI
-    return ChatOpenAI(model=cfg.model, api_key=key, base_url=base, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=30, max_retries=1)
+    return ChatOpenAI(model=selected_model, api_key=key, base_url=base, temperature=cfg.temperature, max_tokens=cfg.max_tokens, timeout=cfg.request_timeout_seconds, max_retries=0)
 
 
 def build_research(settings, secret_store, tavily_key=None):
@@ -207,14 +224,141 @@ def build_research(settings, secret_store, tavily_key=None):
             providers.append(SecFilingsResearchProvider(sec_user_agent=sec_user_agent))
         if settings.ticker_news_enabled:
             providers.append(TickerNewsFeedProvider(sources=settings.news_feed_sources))
+    for provider in providers:
+        # Contract §5 freshness window: items older than max_data_age_hours drop when a newer
+        # item for the same symbol exists (30-day hard rule always applies).
+        provider.max_data_age_hours = settings.max_data_age_hours
     return CompositeResearchProvider(providers) if providers else None
 
 
 def build_dependencies(settings, secret_store, model_key=None, tavily_key=None):
     research = build_research(settings, secret_store, tavily_key=tavily_key)
     model = create_model(settings, secret_store, api_key=model_key) if settings.model_enabled else None
-    return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.market_data_enabled else None,
-                              instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model)
+    write_model = (create_model(settings, secret_store, api_key=model_key, model_name=settings.model.write_model)
+                   if model is not None and settings.model.write_model else None)
+    return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.auto_prices_enabled or settings.market_data_enabled else None,
+                              history_enabled=settings.market_data_enabled,
+                              instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model,
+                              write_model=write_model)
+
+
+# --- Model readiness probe (FR-15, contract §8) -----------------------------
+# A tool/result round trip and the real briefing schema; no portfolio data or key material in prompts.
+
+READINESS_TOOL_PROMPT = "Call the record_probe_note tool with the note ready."
+SECTION_TITLE_LIMIT = 20
+
+
+def probe_tool():
+    """A trivial tool whose only purpose is to see whether the model calls tools."""
+    from langchain_core.tools import StructuredTool
+
+    def record_probe_note(note: str) -> str:
+        """Record one probe note. Call this tool with the note 'ready'."""
+        return note
+
+    return StructuredTool.from_function(record_probe_note)
+
+
+def readiness_ok(tool_calling, structured_output):
+    """Pass only after the research call and structured finalization both work."""
+    return tool_calling == structured_output == "ok"
+
+
+def readiness_detail(tool_calling, structured_output, tool_reason="", structured_reason=""):
+    """One short, plain-language sentence a normal user can act on; never key material."""
+    if tool_calling == "fail" and structured_output == "fail":
+        return (f"The model answered neither readiness probe — {tool_reason or structured_reason or 'the model did not answer'}. "
+                "Check the model endpoint, API key, and model name before running research.")
+    if tool_calling == "fail":
+        return (f"The tool-calling check could not complete — {tool_reason or 'the model did not answer'}. "
+                "Research runs need tool calls to gather evidence; check the model endpoint, API key, and model name.")
+    if structured_output == "fail":
+        return (f"The structured-output check failed — {structured_reason or 'the model did not answer'}. "
+                "Written briefings need JSON output; prefer a model advertised with JSON output.")
+    if tool_calling == "weak" and structured_output == "weak":
+        return ("This model is weak at both tool calling and structured output — reports may stay thin and spend calls fixing formatting. "
+                "A model advertised with tool calling and JSON output is recommended for research runs.")
+    if tool_calling == "weak":
+        return "The model did not make the requested tool call. Check tool support for the model and gateway."
+    if structured_output == "weak":
+        return "The model called the briefing tool but omitted its summary. Choose a model that completes structured tool responses."
+    return "The model completed a tool-result round trip and returned the briefing schema. Longer research runs still depend on source access and the time budget."
+
+
+async def _probe_tool_calling(model):
+    try:
+        bound = model.bind_tools([probe_tool()], tool_choice="any")
+        response = await bound.ainvoke(READINESS_TOOL_PROMPT)
+    except Exception as exc:
+        return "fail", safe_error_reason(exc), []
+    calls = getattr(response, "tool_calls", None) or []
+    if len(calls) != 1 or calls[0].get("name") != "record_probe_note" or calls[0].get("args") != {"note": "ready"}:
+        return "weak", "", []
+    from langchain_core.messages import HumanMessage, ToolMessage
+    return "ok", "", [HumanMessage(content=READINESS_TOOL_PROMPT), response,
+                         ToolMessage(content="ready", tool_call_id=calls[0]["id"], name="record_probe_note")]
+
+
+async def _probe_structured_output(model, history):
+    from .models import ResearchNarrative
+    from langchain_core.messages import HumanMessage
+    try:
+        # Exercise the same nested output schema, required tool choice and tool-result
+        # conversation as the actual agent, rather than an unrelated JSON text reply.
+        bound = model.bind_tools([ResearchNarrative], tool_choice="any")
+        response = await bound.ainvoke([*history, HumanMessage(content=
+            'Finalize with the ResearchNarrative tool. Set executive_summary to "ready", '
+            'sections to [], and suggestions to []. No portfolio research is needed.')])
+        calls = getattr(response, "tool_calls", None) or []
+        if len(calls) != 1 or calls[0].get("name") != "ResearchNarrative":
+            return "fail", "the model did not call the required briefing output tool"
+        narrative = ResearchNarrative.model_validate(calls[0]["args"])
+        if not narrative.executive_summary:
+            return "weak", ""
+    except Exception as exc:
+        return "fail", safe_error_reason(exc)
+    return "ok", ""
+
+
+async def probe_model_readiness(settings, secret_store, model=None, api_key=None):
+    """Probe a research tool/result round trip and the actual briefing schema, without portfolio data."""
+    if model is None:
+        model = create_model(settings, secret_store, api_key=api_key)
+    tool_calling, tool_reason, history = await _probe_tool_calling(model)
+    writer = (create_model(settings, secret_store, api_key=api_key, model_name=settings.model.write_model)
+              if settings is not None and settings.model.write_model else model)
+    structured_output, structured_reason = await _probe_structured_output(writer, history)
+    return {"ok": readiness_ok(tool_calling, structured_output),
+            "tool_calling": tool_calling, "structured_output": structured_output,
+            "detail": readiness_detail(tool_calling, structured_output, tool_reason, structured_reason)}
+
+
+def run_outcome_state(result_json):
+    """Honest per-run outcome fields for one history entry (FR-10/FR-13).
+
+    Additive keys only: ``narrative_state`` (the stored ``AnalysisResult.coverage``
+    value the dashboard badge vocabulary keys off), ``finding_titles`` (capped at
+    ``SECTION_TITLE_LIMIT`` so history payloads stay small, for "what's new since
+    your last briefing" diffs), and ``analysis_written``, the machine-readable
+    flag that is False whenever the stored result says the analyst wrote nothing
+    (``narrative_state == "not_written"`` per contract §2). Missing or unreadable
+    results read as no written analysis.
+    """
+    try:
+        result = json.loads(result_json) if result_json else None
+    except (TypeError, ValueError):
+        result = None
+    if not isinstance(result, dict):
+        return {"narrative_state": None, "section_titles": [], "analysis_written": False, "question": ""}
+    state = (result.get("coverage") or {}).get("narrative_state")
+    budget = result.get("research_budget") or {}
+    titles = [str(section.get("heading") or "") for section in result.get("sections") or []]
+    question = str((result.get("metrics") or {}).get("question")
+                   or (result.get("request") or {}).get("question") or "").strip()
+    return {"narrative_state": state, "section_titles": titles[:SECTION_TITLE_LIMIT],
+            "analysis_written": state != "not_written" and budget.get("analysis_written") is not False,
+            "question": question[:500]}
 
 
 class QuoteService:
@@ -256,11 +400,12 @@ class QuoteService:
         return max(1, int(self.settings_provider().price_refresh_minutes)) * 60
 
     def as_of(self) -> str | None:
-        stamps = [entry.get("retrieved_at") for entry in self.metadata().values() if entry.get("retrieved_at")]
+        stamps = [entry.get("quote_as_of") for entry in self.metadata().values() if entry.get("quote_as_of")]
         return max(stamps) if stamps else None
 
     def is_fresh(self, now: datetime | None = None) -> bool:
-        as_of = self.as_of()
+        stamps = [entry.get('retrieved_at') for entry in self.metadata().values() if entry.get('retrieved_at')]
+        as_of = max(stamps) if stamps else None
         if not as_of:
             return False
         try:
@@ -293,20 +438,37 @@ class QuoteService:
                 return self.metadata()
             if not quotes:
                 return self.metadata()
+            from .providers import valid_market_price
+            quotes = {symbol: {**quote, "price": valid_market_price(quote.get("price")),
+                               "previous_close": valid_market_price(quote.get("previous_close"))}
+                      for symbol, quote in quotes.items() if symbol in symbols
+                      and valid_market_price(quote.get("price")) is not None}
+            if not quotes:
+                return self.metadata()
+            from .providers import quote_is_newer
+            current = self.store.snapshot()
+            if current is not None:
+                positions = {position.symbol:position for position in current.positions}
+                quotes = {symbol:quote for symbol,quote in quotes.items()
+                          if symbol in positions and quote_is_newer(quote,positions[symbol])}
             held = set(symbols)
             metadata = {symbol: entry for symbol, entry in self.metadata().items() if symbol in held}
             for symbol, quote in quotes.items():
                 metadata[symbol] = {"trading_date": quote.get("trading_date"),
                                     "retrieved_at": quote.get("retrieved_at"),
-                                    "source": quote.get("source", "yfinance")}
+                                    "source": quote.get("source", "yfinance"), "quote_as_of":quote.get("quote_as_of"),
+                                    "valuation_type":quote.get("valuation_type")}
             current = self.store.snapshot()
             if current is not None:
                 for position in current.positions:
                     quote = quotes.get(position.symbol)
                     if quote and quote.get("price") is not None:
                         position.price = Decimal(str(quote["price"]))
-                        if quote.get("previous_close") is not None:
-                            position.previous_close = Decimal(str(quote["previous_close"]))
+                        position.previous_close = quote.get("previous_close")
+                        from datetime import date
+                        position.price_session = date.fromisoformat(quote['trading_date']) if quote.get('trading_date') else None
+                        position.price_as_of = datetime.fromisoformat(quote['quote_as_of']) if quote.get('quote_as_of') else None
+                        position.price_source = quote.get('source')
                 self.store.save_snapshot(current)
             self.store.set(self.KEY, metadata)
             self._cache = metadata
@@ -325,6 +487,22 @@ class ApplicationService:
     @property
     def settings(self):
         return load_settings(self.directory)
+
+    def history(self, limit=30):
+        """Run history for the dashboard: newest first, plus per-run outcome state.
+
+        The outcome keys are additive. The one value guard protects contract §2:
+        a run whose stored result says the analyst wrote nothing never exposes
+        ``status: "success"`` (it reads ``"partial"`` instead), so an unwritten
+        briefing cannot look like a clean success.
+        """
+        entries = self.store.history(limit=limit)
+        for entry in entries:
+            row = self.store.run(entry["id"]) or {}
+            entry.update(run_outcome_state(row.get("result")))
+            if not entry["analysis_written"] and entry.get("status") == "success":
+                entry["status"] = "partial"
+        return entries
 
     def request_for(self, snapshot, **overrides):
         settings = self.settings
@@ -494,7 +672,8 @@ class ApplicationService:
             prices[symbol] = {"price": str(position.price) if position.price is not None else None,
                               "previous_close": str(position.previous_close) if position.previous_close is not None else None,
                               "trading_date": entry.get("trading_date"), "retrieved_at": entry.get("retrieved_at"),
-                              "source": entry.get("source")}
+                              "source": entry.get("source"), "price_as_of":entry.get("quote_as_of"),
+                              "price_session":entry.get("trading_date"), "price_source":entry.get("source")}
         return {"prices": prices, "as_of": self.quotes.as_of(), "refresh_seconds": self.quotes.ttl_seconds()}
 
     async def scheduler_loop(self):

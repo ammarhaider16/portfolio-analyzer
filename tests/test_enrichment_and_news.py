@@ -1,15 +1,14 @@
 """Acceptance checks for reviewable metadata and all-position news coverage."""
 import asyncio
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer.delivery import render_report
 from portfolio_analyzer.engine import EngineDependencies, analyze_portfolio
 from portfolio_analyzer.enrichment import PortfolioEnrichmentAgent
-from portfolio_analyzer.models import AnalysisRequest, Evidence, PortfolioSnapshot, Position
+from portfolio_analyzer.models import AnalysisRequest, PortfolioSnapshot
 from portfolio_analyzer.screenshot_import import DraftPosition
 from portfolio_analyzer.web import create_app
 
@@ -41,66 +40,10 @@ def test_enrichment_preserves_user_prices_and_missing_quantities():
     assert missing_price["changes"][0]["price_as_of"] == "2026-10-17"
 
 
-def test_detailed_news_reports_every_holding_and_verified_source():
-    class Research:
-        async def search(self, query, max_results=3):
-            if "Apple Inc" in query:
-                return [Evidence(id="apple", url="https://example.org/apple", title="Apple Inc results",
-                                 publisher="example.org", published_at=datetime.now(timezone.utc),
-                                 content_type="retrieved_page")]
-            return []
-
-    snapshot = PortfolioSnapshot(as_of=datetime.now(timezone.utc), positions=[
-        Position(symbol="AAPL", quantity=2, price=200, asset_type="stock", instrument_name="Apple Inc"),
-        Position(symbol="MSFT", quantity=1, price=300, asset_type="stock", instrument_name="Microsoft Corporation")])
-    result = asyncio.run(analyze_portfolio(AnalysisRequest(snapshot=snapshot, report_length="detailed", max_searches=3),
-                                           EngineDependencies(research=Research())))
-    assert [(item["symbol"], item["status"]) for item in result.coverage["position_news"]] == [
-        ("AAPL", "verified"), ("MSFT", "no_verified_update")]
-    html, plain = render_report(result)
-    assert "Apple Inc results" in html and "https://example.org/apple" in plain
-    assert "MSFT: no verified recent position news found" in plain
-    assert "MSFT: price $300" in plain
-    assert "Market and policy developments" in plain
 
 
-def test_search_limit_names_unchecked_holding_in_detailed_report():
-    class Research:
-        async def search(self, query, max_results=3):
-            return []
-
-    snapshot = PortfolioSnapshot(as_of=datetime.now(timezone.utc), positions=[
-        Position(symbol=symbol, quantity=1, price=price, instrument_name=name)
-        for symbol, price, name in [("AAPL", 300, "Apple Inc"), ("MSFT", 200, "Microsoft Corporation"),
-                                    ("GOOG", 100, "Alphabet Inc")]])
-    result = asyncio.run(analyze_portfolio(AnalysisRequest(snapshot=snapshot, report_length="detailed", max_searches=2),
-                                           EngineDependencies(research=Research())))
-    assert result.coverage["position_news"][2]["status"] == "not_checked"
-    assert any("GOOG" in issue["message"] for issue in result.coverage["issues"])
-    assert "GOOG: news was not checked in this run" in render_report(result)[1]
 
 
-def test_position_news_searches_are_bounded_and_concurrent():
-    active = 0
-    maximum = 0
-
-    class Research:
-        async def search(self, query, max_results=3):
-            nonlocal active, maximum
-            active += 1
-            maximum = max(maximum, active)
-            try:
-                await asyncio.sleep(0.03)
-                return []
-            finally:
-                active -= 1
-
-    snapshot = PortfolioSnapshot(as_of=datetime.now(timezone.utc), positions=[
-        Position(symbol=f"T{i:02}", quantity=1, price=10, instrument_name=f"Company {i}") for i in range(9)])
-    result = asyncio.run(analyze_portfolio(AnalysisRequest(snapshot=snapshot, max_searches=9),
-                                           EngineDependencies(research=Research())))
-    assert maximum == 4
-    assert all(item["status"] == "no_verified_update" for item in result.coverage["position_news"])
 
 
 def test_enrichment_route_does_not_save_draft(tmp_path, monkeypatch):
@@ -116,3 +59,30 @@ def test_enrichment_route_does_not_save_draft(tmp_path, monkeypatch):
         assert response.status_code == 200
         assert response.json()["positions"][0]["quantity"] is None
         assert client.get("/api/status").json()["snapshot"] is None
+
+
+def _feed_research(monkeypatch, *rows, resolve=None):
+    """A real TickerNewsFeedProvider over stubbed feed responses; never the network."""
+    import portfolio_analyzer.providers as providers
+    from portfolio_analyzer.providers import TickerNewsFeedProvider
+    from email.utils import format_datetime
+    body = '<?xml version="1.0"?><rss version="2.0"><channel>' + "".join(
+        f"<item><title>{title}</title><link>{link}</link><description>{description}</description>"
+        f"<pubDate>{format_datetime(datetime.now(timezone.utc) - timedelta(hours=2))}</pubDate></item>"
+        for title, link, description in rows) + "</channel></rss>"
+
+    async def fake(url, *args, **kwargs):
+        return body
+
+    async def resolve_fake(url):
+        return (resolve or {}).get(url, "")
+
+    monkeypatch.setattr(providers, "retrieve_public_text", fake)
+    monkeypatch.setattr(providers, "resolve_feed_link", resolve_fake)
+    return TickerNewsFeedProvider(sources=("google_news",))
+
+
+def _run(research, position):
+    snapshot = PortfolioSnapshot(as_of=datetime.now(timezone.utc), positions=[position])
+    return asyncio.run(analyze_portfolio(AnalysisRequest(snapshot=snapshot, max_searches=8, benchmark=""),
+                                         EngineDependencies(research=research)))

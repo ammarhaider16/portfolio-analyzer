@@ -19,14 +19,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS runs (
                   id TEXT PRIMARY KEY, created_at TEXT NOT NULL, status TEXT NOT NULL,
                   result TEXT, error TEXT, schedule_key TEXT UNIQUE, delivery TEXT,
-                  email_requested INTEGER NOT NULL DEFAULT 0);
+                  email_requested INTEGER NOT NULL DEFAULT 0,
+                  summary TEXT,
+                  research_activity TEXT NOT NULL DEFAULT '[]',
+                  research_budget TEXT NOT NULL DEFAULT '{}');
             """)
-            if "summary" not in {row[1] for row in db.execute("PRAGMA table_info(runs)")}:
-                db.execute("ALTER TABLE runs ADD COLUMN summary TEXT")
-            columns = {row[1] for row in db.execute("PRAGMA table_info(runs)")}
-            for name, default in (("research_activity", "[]"), ("research_budget", "{}")):
-                if name not in columns:
-                    db.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
 
     @contextmanager
     def db(self):

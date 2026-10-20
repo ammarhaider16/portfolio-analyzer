@@ -37,6 +37,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/portfolio_analyzer"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src", "/tests", "/docs", "/examples", "/scripts",
+  "/README.md", "/LICENSE", "/pyproject.toml", "/uv.lock", "/Dockerfile", "/compose.yaml",
+]
+exclude = ["/docs/security-review*", "/docs/security-dependency-audit*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

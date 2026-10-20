@@ -17,9 +17,34 @@ class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: Literal["colgate", "openai", "anthropic", "custom"] = "colgate"
     model: str = "openai/gpt-oss-120b"
+    write_model: str | None = None
     base_url: str = "https://litellm.colgate.edu"
     temperature: float = Field(default=0, ge=0, le=2)
     max_tokens: int = Field(default=3000, ge=256, le=16000)
+    request_timeout_seconds: int = Field(default=90, ge=10, le=300)
+
+    @model_validator(mode="before")
+    @classmethod
+    def provider_endpoint(cls, data):
+        if isinstance(data, dict) and "base_url" not in data:
+            endpoints = {"colgate": "https://litellm.colgate.edu", "openai": "https://api.openai.com/v1",
+                         "anthropic": "https://api.anthropic.com", "custom": "http://127.0.0.1:4000/v1"}
+            data = {**data, "base_url": endpoints.get(data.get("provider", "colgate"), "https://litellm.colgate.edu")}
+        return data
+
+    @field_validator("write_model", mode="before")
+    @classmethod
+    def validate_write_model(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            raise ValueError("Write model must be a model identifier")
+        value = value.strip()
+        if not value:
+            raise ValueError("Write model must not be empty")
+        if len(value) > 100:
+            raise ValueError("Write model must be at most 100 characters")
+        return value
 
     @field_validator("base_url")
     @classmethod
@@ -49,10 +74,10 @@ class Settings(BaseModel):
     ticker_news_enabled: bool = True
     news_feed_sources: list[str] = Field(default_factory=lambda: ["google_news", "nasdaq"])
     sec_contact: str = ""
-    max_searches: int = Field(default=30, ge=0, le=30)
-    max_model_calls: int = Field(default=8, ge=1, le=64)
-    max_tool_calls: int = Field(default=40, ge=0, le=200)
-    max_seconds: int = Field(default=120, ge=1, le=600)
+    max_searches: int = Field(default=100, ge=0, le=500)
+    max_model_calls: int = Field(default=64, ge=1, le=256)
+    max_tool_calls: int = Field(default=200, ge=0, le=1000)
+    max_seconds: int = Field(default=600, ge=1, le=1800)
     max_data_age_hours: int = Field(default=72, ge=1, le=8760)
     benchmark: str = "SPY"
     position_review_threshold_pct: float = Field(default=25, gt=0, le=100)
@@ -67,8 +92,6 @@ class Settings(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def default_sec_for_contact(cls, data):
-        if isinstance(data, dict):
-            data = {key: value for key, value in data.items() if key != "alpha_vantage_enabled"}
         if isinstance(data, dict) and "sec_company_filings_enabled" not in data and valid_sec_contact(data.get("sec_contact")):
             data = {**data, "sec_company_filings_enabled": True}
         return data
@@ -119,14 +142,6 @@ def load_settings(directory: Path) -> Settings:
             data[key] = json.loads(value)
         except json.JSONDecodeError:
             data[key] = value
-    # Ignore obsolete connector configuration from pre-manual-portfolio installations.
-    data.pop("broker_account_id", None)
-    # Retain invalid legacy contacts for a corrective dashboard notice, without
-    # letting them bypass the provider's independent request guard.
-    legacy_contact = data.get("sec_contact", "")
-    if legacy_contact and not valid_sec_contact(legacy_contact):
-        settings = Settings.model_validate({**data, "sec_contact": ""})
-        return settings.model_copy(update={"sec_contact": legacy_contact})
     return Settings.model_validate(data)
 
 

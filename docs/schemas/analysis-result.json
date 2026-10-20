@@ -1,29 +1,5 @@
 {
   "$defs": {
-    "BriefingSummary": {
-      "additionalProperties": false,
-      "properties": {
-        "text": {
-          "maxLength": 1600,
-          "minLength": 1,
-          "title": "Text",
-          "type": "string"
-        },
-        "evidence_ids": {
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 30,
-          "title": "Evidence Ids",
-          "type": "array"
-        }
-      },
-      "required": [
-        "text"
-      ],
-      "title": "BriefingSummary",
-      "type": "object"
-    },
     "Evidence": {
       "additionalProperties": false,
       "properties": {
@@ -81,90 +57,35 @@
       "title": "Evidence",
       "type": "object"
     },
-    "Finding": {
+    "ReportSection": {
       "additionalProperties": false,
       "properties": {
-        "title": {
-          "title": "Title",
+        "heading": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Heading",
           "type": "string"
         },
-        "detail": {
-          "title": "Detail",
+        "content": {
+          "maxLength": 30000,
+          "minLength": 1,
+          "title": "Content",
           "type": "string"
-        },
-        "evidence_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Evidence Ids",
-          "type": "array"
-        },
-        "kind": {
-          "default": "observation",
-          "title": "Kind",
-          "type": "string"
-        },
-        "affected_symbols": {
-          "items": {
-            "type": "string"
-          },
-          "maxItems": 30,
-          "title": "Affected Symbols",
-          "type": "array"
-        },
-        "event_date": {
-          "anyOf": [
-            {
-              "format": "date",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Event Date"
-        },
-        "portfolio_relevance": {
-          "anyOf": [
-            {
-              "maxLength": 1000,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Portfolio Relevance"
-        },
-        "uncertainty": {
-          "anyOf": [
-            {
-              "maxLength": 1000,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Uncertainty"
         }
       },
       "required": [
-        "title",
-        "detail"
+        "heading",
+        "content"
       ],
-      "title": "Finding",
+      "title": "ReportSection",
       "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "1.0",
-      "default": "1.0",
+      "const": "2.0",
+      "default": "2.0",
       "title": "Schema Version",
       "type": "string"
     },
@@ -202,23 +123,17 @@
       "title": "Coverage",
       "type": "object"
     },
-    "findings": {
-      "items": {
-        "$ref": "#/$defs/Finding"
-      },
-      "title": "Findings",
-      "type": "array"
-    },
     "executive_summary": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/BriefingSummary"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
+      "default": "",
+      "title": "Executive Summary",
+      "type": "string"
+    },
+    "sections": {
+      "items": {
+        "$ref": "#/$defs/ReportSection"
+      },
+      "title": "Sections",
+      "type": "array"
     },
     "research_activity": {
       "items": {

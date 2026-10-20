@@ -3,6 +3,7 @@ import os
 import asyncio
 import re
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,6 +11,10 @@ from fastapi.testclient import TestClient
 from portfolio_analyzer.models import AnalysisResult
 from portfolio_analyzer.secrets import SecretStore
 from portfolio_analyzer.web import create_app
+
+
+def read_static(name):
+    return (Path(__file__).parents[1] / 'src/portfolio_analyzer' / 'static' / name).read_text(encoding='utf-8')
 
 
 @pytest.fixture(autouse=True)
@@ -280,7 +285,7 @@ def test_model_connection_probe_uses_real_portfolio_metrics(tmp_path, monkeypatc
         assert float(metrics['known_value']) > 0
         assert sources == []
         calls.append(request)
-        return ResearchNarrative()
+        return ResearchNarrative(executive_summary="Ready")
     monkeypatch.setattr(agent, 'generate_narrative', generate)
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
         response = post(client, csrf(client), '/api/test/model', {})
@@ -322,17 +327,17 @@ def test_delete_finished_report_owner_only(tmp_path):
         assert client.delete('/api/runs/' + run_id).status_code == 403
 
 
-def test_model_key_delete_targets_the_effective_legacy_slot(tmp_path, isolated_credentials):
+def test_model_key_delete_targets_the_active_provider_slot(tmp_path, isolated_credentials):
     # A key migrated to the legacy shared slot must be removable from the dashboard, not
     # redirected to an empty per-provider slot.
     values = isolated_credentials
-    values['model_api_key'] = 'legacy-key-123'
+    values['model_api_key_colgate'] = 'dedicated-key-123'
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
         token = csrf(client)
         assert client.get('/api/status').json()['secrets']['model_api_key']['present'] is True
         response = client.delete('/api/secrets/model_api_key', headers={'x-csrf-token': token})
         assert response.status_code == 200, response.text
-        assert 'model_api_key' not in values
+        assert 'model_api_key_colgate' not in values
         assert client.get('/api/status').json()['secrets']['model_api_key']['present'] is False
 
 
@@ -356,3 +361,30 @@ def test_safe_error_reason_maps_status_and_redacts():
     redacted = safe_error_reason(Exception('bad key secret-abc'), 'secret-abc')
     assert 'secret-abc' not in redacted
     assert 'saved-provider-key' not in safe_error_reason(Exception('Invalid saved-provider-key'))
+
+
+def test_fr15_readiness_button_posts_and_shows_errors_verbatim(tmp_path, monkeypatch):
+    from portfolio_analyzer import web
+    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
+        token = csrf(client)
+        html = client.get('/').text
+        assert 'data-test="model-readiness"' in html
+        assert 'Test research readiness' in html
+        assert 'id="readiness-state"' in html
+        js = read_static('app.js')
+        assert '/api/model/readiness' in js
+        assert 'renderReadinessError(error.message)' in js  # 400 detail text rendered verbatim
+        # Without a configured key the endpoint answers 400; the UI shows its detail as-is.
+        missing = post(client, token, '/api/model/readiness', {})
+        assert missing.status_code == 400
+        assert missing.json()['detail']
+
+        async def fake(settings, secrets, model=None, api_key=None):
+            return {'ok': False, 'tool_calling': 'weak', 'structured_output': 'fail',
+                    'detail': 'The structured-output check failed — the reply contained no JSON object.'}
+
+        monkeypatch.setattr(web, 'probe_model_readiness', fake)
+        response = post(client, token, '/api/model/readiness', {})
+        assert response.status_code == 200, response.text
+        assert response.json() == {'ok': False, 'tool_calling': 'weak', 'structured_output': 'fail',
+                                   'detail': 'The structured-output check failed — the reply contained no JSON object.'}

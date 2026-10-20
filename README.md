@@ -22,6 +22,7 @@ Use **Fill missing details** on a draft to look up exact-ticker instrument names
 Under **Imports & models**, choose either:
 
 - **CSV:** download a template in **Import & research**, preview a file, review/edit its positions and cash in the dashboard, then save. See [examples/holdings.csv](examples/holdings.csv). Supply a `ticker` (or `symbol`) and shares; a `price` column is optional and acts only as an offline fallback until automatic quotes replace it. `quantity` is optional in the file, but you must enter it in the review screen before saving because share count cannot be inferred from price. The draft names missing share counts and focuses the first one. Older `symbol,quantity` files remain accepted. Instrument type, issuer name, sector, and previous close are optional; research fills available metadata without inventing missing values. CASH and cash-type rows become the cash balance. With only `ticker,price`, a CASH row treats price as the cash amount. Quoted currency amounts such as `"$1,250.50"` are supported.
+
 - **Screenshot:** upload PNG, JPEG, or WebP up to 5 MB. Explicitly authorize sending the image to your configured model. A vision-capable model is required; the Colgate text-model preset might not support images. Extraction creates an unsaved draft. Unreadable quantities and cash remain blank and must be filled in before saving. Review every value: image extraction can make mistakes. Crop out account numbers and unrelated personal details. Original image bytes are not saved by this application.
 
 Cash-only portfolios are supported. Duplicate holding rows must be combined before saving. The current portfolio is always the **latest saved** draft, not a partially edited import. Saving an edit replaces the current portfolio. Previous reports keep their original results.
@@ -33,14 +34,18 @@ Scheduled runs use the most recently saved quantities and cash at the start of t
 ## Configure research
 
 1. Configure and test a model in **Imports & models**. Colgate LiteLLM defaults to `openai/gpt-oss-120b` at `https://litellm.colgate.edu`. OpenAI, Anthropic, and custom OpenAI-compatible endpoints are supported.
+
 2. Keyless search, Federal Reserve updates, and keyless ticker news feeds (Google News/Nasdaq) are enabled by default for saved portfolios. SEC per-company filings (8-K/10-Q/10-K) are optional and start off without an identifying contact. Add a contact such as `Your name contact@example.com` beside the SEC checkbox to enable them; you can turn them off afterward. For more dependable news discovery, choose Tavily and add a key; you can also disable external research. Provider quotas still apply.
+
 3. Prices update automatically: the server polls market data in the background (every minute while US markets are open, otherwise every 15 minutes by default) and via the dashboard's `GET /api/quotes` poll. Tune this with the `auto_prices_enabled` and `price_refresh_minutes` settings. Optionally enable yfinance for research-time daily closing prices and historical estimates. It is unofficial and intended for personal use.
+
 4. Optionally supplement broad search with Federal Reserve updates or identified SEC current-filings discovery.
+
 5. Generate a briefing from **My saved portfolio**. The finished conclusions appear below the portfolio summary and remain available in Research history. The dashboard shows whether portfolio measures, current-event search, and written analysis are configured and last tested.
 
-With a model enabled, the analyst chooses research tools and sources, refines queries, follows links, and cross-checks material claims. It starts with portfolio measures and lightweight news coverage, then investigates within your limits. **Research activity** shows tool calls, source outcomes, and budget usage while the run is active and afterward. It does not display private model reasoning.
+The analyst chooses its own research approach, queries, report headings and emphasis. Three tools support it: news search with prepared readable content, article reading, and market-data lookup. The briefing includes an executive summary, daily position outlook, relevant news and important considerations. Brief and detailed preferences guide the amount of detail.
 
-Defaults are two minutes, 30 discovery queries, eight model calls, and 40 tool calls. Adjust limits in **Preferences ? Advanced thresholds and limits**. A deeper run can consume more model-provider usage. No actionable recommendation is required: a quiet or inconclusive run may contain no event findings, and adjustment ideas remain off unless explicitly requested.
+Internal backstops default to ten minutes, 100 searches, 64 model calls and 200 tool calls. They are service configuration, not dashboard counters. The optional run trace shows tool activity and outcomes without private model reasoning.
 
 **Test saved search** checks each configured source separately and shows passed, empty, skipped, failed, or disabled outcomes. An empty response means the request worked but found no matching updates. Federal Reserve, Google News, and Nasdaq have separate outcomes, so a blocked feed cannot hide another feed that works. SEC requests with a missing or invalid identifying contact are skipped and named in run coverage. Changing research settings invalidates the saved source checks.
 
@@ -48,9 +53,11 @@ Briefings group related headlines into stories and order holdings by known posit
 
 Dates use the timezone selected in Schedule & email, including when scheduling is off. Detailed reports include a holding data table; brief reports include available price changes versus the prior close. Data notes keep the two most actionable limitations visible and expand the remainder. Percentage-only email keeps amounts and narrative out of the message.
 
-Model API access needs a key with access to the selected model. No model is enabled by default. Missing or failed providers leave labeled coverage notes. Web snippets are discovery references; event findings require retrieved, official, or dated news-headline evidence tied to the correct instrument, and headline-grade items are labeled as reported rather than verified article text. Search coverage is not a guaranteed events calendar, and coincident news does not establish causation.
+Model API access needs a key with access to the selected tool-capable model. No model is enabled by default. An optional write model can produce the final report after the research model has investigated. News preparation supplies publisher, publication date and readable content; the analyst decides what matters and explains material uncertainty in ordinary language.
 
-The briefing gives a short interpretation even when external research is unavailable. It names excluded holdings beside known values and percentages, and explains any missing event evidence. It checks each position up to the configured search limit and lists verified position news with source links; detailed reports list price, previous close, type, and news status for every saved holding. Holdings beyond the search limit are marked as not checked. Market and policy items are shown separately when a relevant source is found. Raw metrics remain in the structured result. Configure report detail and optional investment targets under **Preferences**; enter common stock, bond, and cash targets as percentages, with other targets and technical limits under advanced controls. Adjustment ideas require a complete investment profile and an explicit per-run request. That checkbox resets after a run; scheduled reports never request adjustment ideas.
+Model readiness (the setup test behind `POST /api/model/readiness`) sends two one-line probe requests and no portfolio data: one asks the model to call a trivial tool, one asks for a tiny JSON object. Each check reports `ok`, `weak`, or `fail`. A `weak` tool check means the analyst may gather little evidence and reports stay thin; a `weak` JSON check means briefing writes spend extra calls fixing formatting and the written analysis is more likely to be lost. For research runs, tool-calling and structured-output reliability matter more than raw model size: prefer models advertised with tool/function calling and JSON output. `fail` on either check points at the endpoint, API key, or model name first.
+
+The dashboard and email use the same report, preserving model-chosen headings and prose. Sources and operational details remain available in the run record rather than filling the briefing. Current prices use timestamped regular-session quotes; daily-history fallback keeps its actual session date. Older or undated prices never become today’s returns, and an older response cannot overwrite a newer saved quote. The expected US session respects market opens, weekends and holidays. Adjustment ideas require an explicit request; scheduled runs do not request them.
 
 **Research history** keeps your recent briefings in a bounded, scrollable list. Delete an individual report, or use **Clear finished** to remove completed runs; reports also age out after the retention window set under Preferences. Notices can be dismissed with the × control, and the model endpoint honors the base URL you configure for the selected provider.
 
@@ -96,7 +103,6 @@ The core is reusable without the dashboard or storage:
 ```python
 from portfolio_analyzer import AnalysisRequest, EngineDependencies, analyze_portfolio
 from portfolio_analyzer.agent import create_research_tool
-
 request = AnalysisRequest.model_validate(your_request_dict)
 dependencies = EngineDependencies()  # Inject configured providers for network research
 result = await analyze_portfolio(request, dependencies)
@@ -110,7 +116,7 @@ An external trading parent receives research, evidence, coverage, and optional i
 
 Configuration and reports live in the platform user-data directory; override with `PORTFOLIO_DATA_DIR` or `--data-dir`. Retention defaults to 90 days. Financial data and reports are stored locally in SQLite; protect the directory and backups with OS permissions and disk encryption.
 
-API keys use a supported OS credential store with no plaintext fallback. Model keys are stored per provider (`PORTFOLIO_SECRET_MODEL_API_KEY_COLGATE`, `..._OPENAI`, `..._ANTHROPIC`, `..._CUSTOM`) so switching provider never silently reuses another provider's key; the legacy shared `PORTFOLIO_SECRET_MODEL_API_KEY` is still read once so existing installs keep working. Other credentials use `PORTFOLIO_SECRET_<NAME>` for `TAVILY_API_KEY`, `SMTP_PASSWORD`, `OWNER_PASSWORD`, and `API_TOKEN`.
+API keys use a supported OS credential store with no plaintext fallback. Model keys are stored per provider (`PORTFOLIO_SECRET_MODEL_API_KEY_COLGATE`, `..._OPENAI`, `..._ANTHROPIC`, `..._CUSTOM`) so switching provider never silently reuses another provider's key. Other credentials use `PORTFOLIO_SECRET_<NAME>` for `TAVILY_API_KEY`, `SMTP_PASSWORD`, `OWNER_PASSWORD`, and `API_TOKEN`.
 
 Every consumer resolves secrets with one precedence rule, highest first: a `PORTFOLIO_SECRET_<NAME>` environment variable, then an absolute `PORTFOLIO_SECRET_<NAME>_FILE` mounted file, then the key saved from the dashboard, then a documented convenience alias (`LITELLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`). Canonical `PORTFOLIO_SECRET_*` values are authoritative and read-only; convenience aliases are only a fallback, so a key saved in the dashboard overrides an ambient alias (for example a stale `LITELLM_API_KEY` left in your shell) — the model card reports which alias is supplying a key and lets you replace it.
 
@@ -120,13 +126,13 @@ Nonsecret overrides use `PORTFOLIO_SETTING_<FIELD>`; use JSON for nested objects
 
 External models receive bounded portfolio/profile context and evidence; the account identifier is omitted. Screenshot extraction sends sanitized pixels to the selected provider only after the upload action. Search providers receive ticker/focus queries. Do not put secrets in questions. The app does not enable external tracing. HTML includes no remote images or scripts.
 
-The primary local target is Windows; Linux/macOS credential storage requires a supported OS keyring. Manual portfolios and the offline demo do not need a keyring. Old broker settings are ignored, and no stored brokerage credentials are read.
+The primary local target is Windows; Linux/macOS credential storage requires a supported OS keyring. Manual portfolios and the offline demo do not need a keyring. No brokerage integration or brokerage credentials are required.
 
 ## Private server deployment
 
 The Docker image uses frozen uv dependencies, a nonroot user, and persistent `/data`. Compose binds only to loopback and requires an HTTPS reverse proxy. Do not expose port 8000 directly.
 
-Create a private `deployment-secrets` directory with files named `owner_password`, `api_token`, `model_api_key`, `tavily_api_key`, and `smtp_password`. The owner password must have at least 16 characters; use a long random API token. Optional provider files can be empty. Keep permissions restrictive and never commit them.
+Create a private `deployment-secrets` directory with files named `owner_password`, `api_token`, `model_api_key_colgate`, `tavily_api_key`, and `smtp_password`. The owner password must have at least 16 characters; use a long random API token. Optional provider files can be empty. The Compose example mounts a Colgate model key; for another provider, use its `PORTFOLIO_SECRET_MODEL_API_KEY_<PROVIDER>_FILE` variable and matching secret file. Keep permissions restrictive and never commit them.
 
 Set `PORTFOLIO_PUBLIC_URL` to your exact HTTPS origin, then run `docker compose up --build -d`. Sign in and configure providers; edit mounted credential files outside the dashboard. For non-Docker hosting, set `PORTFOLIO_SERVER_MODE=1`, the HTTPS origin, and owner secret, then run `uv run portfolio-analyzer serve --server --host 0.0.0.0` behind a protected reverse proxy.
 
@@ -143,3 +149,4 @@ uv run python examples/subagent.py --langchain
 
 Tests use fixtures/mocked external responses. `diagnostics --live` and connection-test buttons explicitly consume configured provider access. Screenshot model capability, provider entitlements, and real inbox delivery require your credentials. An optional browser test uses Node.js and installed Chrome: start a dashboard with a test data directory, then run `node scripts/browser-smoke.mjs`; set `CHROME_PATH` if necessary. Screenshots go under ignored `.tools`.
 
+Model request timeout is configurable under advanced model settings (90 seconds by default). The overall research budget still applies. Research readiness checks the tool-result conversation and the actual briefing schema; it does not guarantee that every source will answer. The optional write model writes the final briefing while the research model selects and uses research tools.

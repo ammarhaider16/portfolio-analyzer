@@ -29,31 +29,12 @@ from .models import AnalysisRequest, AnalysisResult, PortfolioSnapshot
 from .scheduling import next_session_run
 from .secrets import SecretStorageError
 from .service import (MODEL_PROVIDER_ALIASES, MODEL_PROVIDER_SLOTS, SECRET_ALIASES, ApplicationService,
-                      build_dependencies, create_model, read_secret, resolve_model_key, resolve_secret, secret_status)
+                      build_dependencies, create_model, probe_model_readiness, read_secret,
+                      resolve_secret, safe_error_reason, secret_status)
 from .screenshot_import import DraftPosition
 
 MODEL_SECRET_SLOTS = set(MODEL_PROVIDER_SLOTS.values()) | {"model_api_key"}
 DEPLOYMENT_SECRETS = {"tavily_api_key", "smtp_password"}
-
-
-def safe_error_reason(exc, secret=None):
-    """A short, secret-free category describing why a provider call failed."""
-    status = getattr(exc, "status_code", None)
-    if status is None:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status == 401:
-        return "the endpoint rejected the API key (HTTP 401). Check that the key belongs to the selected provider"
-    if status == 403:
-        return "the endpoint refused access (HTTP 403). Check the key's permissions and model access"
-    if status == 404:
-        return "the endpoint or model was not found (HTTP 404). Check the base URL and model identifier"
-    if status == 429:
-        return "the provider rate limit was reached (HTTP 429)"
-    if isinstance(status, int) and status >= 500:
-        return f"the provider returned a server error (HTTP {status})"
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-        return "the provider request timed out; check the connection and retry"
-    return "the provider request failed; check the selected model, credentials, and connection"
 
 
 def secret_kind(name):
@@ -181,6 +162,28 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             raise ValueError("Expected a JSON object")
         return body
 
+    async def optional_probe_value(request):
+        # Optional in-memory credential for connection/readiness probes: tested
+        # but never persisted or logged.
+        raw = await request.body()
+        if not raw:
+            return None
+        try:
+            body = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError("Expected a JSON object") from None
+        if not isinstance(body, dict):
+            raise ValueError("Expected a JSON object")
+        candidate = body.get("value")
+        if candidate is None:
+            return None
+        if not isinstance(candidate, str):
+            raise ValueError("Enter a valid credential")
+        candidate = candidate.strip()
+        if not candidate or len(candidate) > 4096:
+            raise ValueError("Enter a valid credential")
+        return candidate
+
     @app.middleware("http")
     async def security(request, call_next):
         cookie = request.cookies.get("portfolio_session", "")
@@ -304,9 +307,9 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             next_run = (await asyncio.to_thread(next_session_run, datetime.now(timezone.utc), settings.schedule.delay_minutes, settings.schedule.timezone)).isoformat()
         secrets = await asyncio.to_thread(secret_status, settings, service.secrets, server)
         storage = await asyncio.to_thread(service.secrets.storage_status)
-        legacy = ("model_api_key", "tavily_api_key", "smtp_password")
+        managed_secrets = ("model_api_key", "tavily_api_key", "smtp_password")
         return {"snapshot": snapshot.model_dump(mode="json") if snapshot else None,
-                "history": service.store.history(), "settings": settings.model_dump(mode="json"),
+                "history": service.history(), "settings": settings.model_dump(mode="json"),
                 "prices": quotes["prices"], "prices_as_of": quotes["as_of"],
                 "externally_managed": sorted(externally_managed()), "next_run": next_run,
                 "verified_recipient": service.store.get("verified_recipient"), "server": server,
@@ -314,8 +317,8 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                 "connection_tests": service.store.get("connection_tests", {}),
                 "secrets": secrets,
                 "secret_storage": storage,
-                "secrets_present": {name: secrets[name]["present"] for name in legacy},
-                "secrets_editable": {name: secrets[name]["editable"] for name in legacy}}
+                "secrets_present": {name: secrets[name]["present"] for name in managed_secrets},
+                "secrets_editable": {name: secrets[name]["editable"] for name in managed_secrets}}
 
     @app.get("/api/quotes")
     async def quotes():
@@ -365,13 +368,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         service.store.set("connection_tests", tests)
 
     def target_secret(name):
-        # A bare model_api_key means the slot that actually supplies the key for the selected
-        # provider: its dedicated slot, or the legacy shared slot being migrated. This keeps
-        # update/delete acting on the effective credential instead of an empty sibling slot.
         if name == "model_api_key":
-            _, source, used = resolve_model_key(service.settings, service.secrets)
-            if source == "keyring" and used:
-                return used
             return MODEL_PROVIDER_SLOTS[service.settings.model.provider]
         return name
 
@@ -428,24 +425,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
     async def test_connection(kind: str, request: Request):
         if kind not in {"model", "search"}:
             raise HTTPException(404)
-        # Optional in-memory value: tested but never persisted or logged.
-        value = None
-        raw = await request.body()
-        if raw:
-            try:
-                body = json.loads(raw)
-            except (ValueError, UnicodeDecodeError):
-                raise ValueError("Expected a JSON object") from None
-            if not isinstance(body, dict):
-                raise ValueError("Expected a JSON object")
-            candidate = body.get("value")
-            if candidate is not None:
-                if not isinstance(candidate, str):
-                    raise ValueError("Enter a valid credential")
-                candidate = candidate.strip()
-                if not candidate or len(candidate) > 4096:
-                    raise ValueError("Enter a valid credential")
-                value = candidate
+        value = await optional_probe_value(request)
         try:
             async with asyncio.timeout(50):
                 if kind == "model":
@@ -462,7 +442,9 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                             raise ValueError("Model endpoint check failed: " + safe_error_reason(exc, value)) from None
                     # Stage 2 exercises the structured-output request the briefing actually makes.
                     try:
-                        await generate_narrative(model, AnalysisRequest(snapshot=snapshot), calculate_metrics(snapshot), [])
+                        narrative = await generate_narrative(model, AnalysisRequest(snapshot=snapshot, max_model_calls=2, max_seconds=40), calculate_metrics(snapshot), [])
+                        if not narrative or not (narrative.executive_summary or narrative.sections):
+                            raise ValueError("The model did not produce a readable briefing")
                     except Exception as exc:
                         raise ValueError("The endpoint answered, but it did not return the required structured response: " + safe_error_reason(exc, value)) from None
                 elif kind == "search":
@@ -511,6 +493,19 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         tests[kind] = {"status": "passed", "tested_at": datetime.now(timezone.utc).isoformat()}
         service.store.set("connection_tests", tests)
         return {"ok": True, "message": "Connection and required response format verified"}
+
+    @app.post("/api/model/readiness")
+    async def model_readiness(request: Request):
+        # Owner-context readiness probe of the configured chat model (FR-15,
+        # contract §8). Optional in-memory value: probed but never persisted.
+        value = await optional_probe_value(request)
+        try:
+            async with asyncio.timeout(65):
+                return await probe_model_readiness(service.settings, service.secrets, api_key=value)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Readiness check failed: " + safe_error_reason(exc, value)) from None
 
     @app.post("/api/import")
     async def import_holdings(request: Request):

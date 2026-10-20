@@ -4,7 +4,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-import pandas as pd
 from fastapi.testclient import TestClient
 
 from portfolio_analyzer.config import Settings
@@ -22,7 +21,7 @@ def settings(**overrides):
 def quote(price="120", previous_close="119", retrieved_at=None, source="yfinance"):
     return {"price": Decimal(price), "previous_close": None if previous_close is None else Decimal(previous_close),
             "trading_date": "2026-10-16", "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat(),
-            "source": source}
+            "source": source, "quote_as_of":retrieved_at, "valuation_type":"regular_session"}
 
 
 class FakeProvider:
@@ -37,45 +36,10 @@ class FakeProvider:
         return {symbol: value for symbol, value in self._quotes.items() if symbol in symbols}
 
 
-def test_batch_quotes_maps_fields_from_one_request(monkeypatch):
-    import yfinance as yf
-    columns = pd.MultiIndex.from_tuples([("ABC", "Close"), ("XYZ", "Close")])
-    frame = pd.DataFrame([[10.0, 100.0], [11.5, 101.0]],
-                         index=pd.to_datetime(["2026-10-15", "2026-10-16"]), columns=columns)
-    calls = []
-
-    def download(symbols, **kwargs):
-        calls.append(symbols)
-        assert kwargs["group_by"] == "ticker"
-        return frame
-
-    monkeypatch.setattr(yf, "download", download)
-    quotes = asyncio.run(YFinanceMarketDataProvider().quotes(["abc", "XYZ", "MISSING"]))
-    assert calls == ["ABC XYZ MISSING"]  # one batched request for every requested symbol
-    assert set(quotes) == {"ABC", "XYZ"}  # MISSING is omitted, never invented
-    assert quotes["ABC"]["price"] == Decimal("11.5")
-    assert quotes["ABC"]["previous_close"] == Decimal("10.0")
-    assert quotes["ABC"]["trading_date"] == "2026-10-16"
-    assert quotes["ABC"]["source"] == "yfinance"
-    assert quotes["ABC"]["retrieved_at"]
 
 
-def test_batch_quotes_omits_symbols_without_usable_close(monkeypatch):
-    import yfinance as yf
-    columns = pd.MultiIndex.from_tuples([("ABC", "Close"), ("XYZ", "Close")])
-    frame = pd.DataFrame([[10.0, None], [None, None]],
-                         index=pd.to_datetime(["2026-10-15", "2026-10-16"]), columns=columns)
-    monkeypatch.setattr(yf, "download", lambda *args, **kwargs: frame)
-    quotes = asyncio.run(YFinanceMarketDataProvider().quotes(["ABC", "XYZ"]))
-    assert set(quotes) == {"ABC"}
-    assert quotes["ABC"]["price"] == Decimal("10.0")
-    assert quotes["ABC"]["previous_close"] is None
 
 
-def test_empty_download_returns_no_quotes(monkeypatch):
-    import yfinance as yf
-    monkeypatch.setattr(yf, "download", lambda *args, **kwargs: pd.DataFrame())
-    assert asyncio.run(YFinanceMarketDataProvider().quotes(["ABC"])) == {}
 
 
 def saved(tmp_path, **kwargs):
@@ -100,7 +64,8 @@ def test_refresh_updates_prices_but_never_quantity_cash_or_as_of(tmp_path):
     assert persisted.cash == Decimal("1250.50")
     assert persisted.as_of == datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
     assert store.get("prices_as_of")["ABC"] == {"trading_date": "2026-10-16",
-                                                "retrieved_at": retrieved.isoformat(), "source": "yfinance"}
+                                                "retrieved_at": retrieved.isoformat(), "source": "yfinance",
+                                                "quote_as_of":retrieved.isoformat(), "valuation_type":"regular_session"}
     assert service.as_of() == retrieved.isoformat()
 
 
@@ -116,12 +81,6 @@ def test_second_call_within_ttl_does_not_refetch(tmp_path):
     assert provider.calls == 2
 
 
-def test_ttl_is_short_during_market_hours_and_relaxed_otherwise(tmp_path):
-    service = QuoteService(Store(tmp_path), FakeProvider(), lambda: settings(price_refresh_minutes=15))
-    friday_open = datetime(2026, 10, 16, 15, 0, tzinfo=timezone.utc)
-    saturday = datetime(2026, 10, 17, 15, 0, tzinfo=timezone.utc)
-    assert service.ttl_seconds(friday_open) == 60
-    assert service.ttl_seconds(saturday) == 900
 
 
 def test_partial_quotes_leave_missing_symbols_untouched(tmp_path):

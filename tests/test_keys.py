@@ -161,7 +161,8 @@ def test_test_endpoint_uses_value_without_persisting(tmp_path, monkeypatch):
         return object()
 
     async def fake_generate(model, request, metrics, sources, **kwargs):
-        return None
+        from portfolio_analyzer.models import ResearchNarrative
+        return ResearchNarrative(executive_summary="Ready")
 
     monkeypatch.setattr(web, 'create_model', fake_create)
     monkeypatch.setattr(agent, 'generate_narrative', fake_generate)

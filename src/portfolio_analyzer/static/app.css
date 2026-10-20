@@ -19,14 +19,6 @@ html{scroll-behavior:smooth}body{font-size:14px}.sidebar{width:215px;background:
 #chart-total{white-space:nowrap}
 .poll-status{font-size:11px;color:var(--muted);margin:8px 0}
 .field-error{display:block;color:#a1403b;font-size:11px;font-weight:500;margin-top:3px;line-height:1.4}
-.news-legend{list-style:none;display:grid;gap:5px;margin:6px 0 0;padding:0}
-.news-legend li{display:flex;align-items:baseline;gap:8px;font-size:12px;color:var(--muted);line-height:1.4}
-.news-legend strong{color:var(--ink);font-size:12px}
-.news-dot{flex:none;width:8px;height:8px;border-radius:50%;background:#7f918a}
-.news-dot.verified{background:#176a56}
-.news-dot.headline{background:#d69a57}
-.news-dot.failed{background:#a1403b}
-.news-dot.unchecked{background:#b8c2bd}
 #notice{display:flex;align-items:flex-start;gap:10px}
 #notice .alert-text{min-width:0}
 #secret-storage{display:flex;align-items:flex-start;gap:10px}
@@ -50,3 +42,20 @@ html{scroll-behavior:smooth}body{font-size:14px}.sidebar{width:215px;background:
 }
 
 .briefing-summary{font-size:1.08rem;line-height:1.65}.activity-entries{padding-left:1.4rem;max-height:23rem;overflow-y:auto}.activity-entries li{padding:.55rem .25rem;border-bottom:1px solid var(--line,#dbe2df)}.activity-entries strong,.activity-entries span{display:block}.activity-entries span{font-size:.85rem;color:var(--muted,#536366);overflow-wrap:anywhere}
+
+#activity-technical{margin-top:10px}
+#activity-technical summary{cursor:pointer;font-size:11px;color:var(--muted)}
+/* FR-10: named run badge states; the retry state pairs with a re-run affordance. */
+.badge.state-written{background:#e9f1e8;border-color:#aec6b6;color:var(--green)}
+.badge.state-retry{background:#fff3e2;border-color:#e2c193;color:#8a5a24}
+.badge.state-failed{background:#fbeeec;border-color:#d9a29c;color:#a1403b}
+.run-highlight{outline:3px solid var(--accent);outline-offset:3px}
+/* FR-3: the reader's question appears above the briefing. */
+.asked-line{font-size:12px;color:var(--muted);margin:0 0 4px}
+/* FR-15: inline readiness grades (ok=green, weak=amber, fail=red). */
+.readiness-state{display:grid;gap:5px;margin:10px 0 0}
+.readiness-grade{display:block;font-size:11px;font-weight:650;border-left:3px solid;padding:4px 9px}
+.readiness-ok{border-color:#176a56;color:#176a56;background:#eef6f1}
+.readiness-weak{border-color:#d69a57;color:#8a5a24;background:#fff7e9}
+.readiness-fail{border-color:#a1403b;color:#a1403b;background:#fbeeec}
+.readiness-detail{font-size:11px;line-height:1.5;color:var(--muted);margin:0}

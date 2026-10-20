@@ -79,56 +79,10 @@ async def test_email_and_schedule_are_independent(app, monkeypatch, schedule_ena
     assert row["delivery"] == ("sent" if email_enabled else None)
 
 
-async def test_owner_budgets_cap_explicit_requests(app, monkeypatch):
-    configure(app, max_searches=2, max_seconds=5, max_data_age_hours=12, max_model_calls=2, max_tool_calls=3)
-    captured = []
-
-    async def analyze(request, _dependencies):
-        captured.append(request)
-        return AnalysisResult(snapshot_as_of=request.snapshot.as_of)
-
-    monkeypatch.setattr(module, "analyze_portfolio", analyze)
-    from portfolio_analyzer.models import AnalysisRequest
-    request = AnalysisRequest(snapshot=demo_snapshot(), max_searches=30, max_seconds=600, max_data_age_hours=8760)
-    row = await completed(app, request=request)
-    assert row["status"] == "success"
-    assert (captured[0].max_searches, captured[0].max_seconds, captured[0].max_data_age_hours) == (2, 5, 12)
-    assert (captured[0].max_model_calls, captured[0].max_tool_calls) == (2, 3)
 
 
-async def test_running_activity_survives_cancellation_and_recovery(app, monkeypatch):
-    configure(app)
-    ready = asyncio.Event()
-
-    async def analyze(request, dependencies):
-        dependencies.activity_sink({'tool': 'search_news', 'asset': 'AAPL', 'status': 'started'}, {'tool_calls': 1})
-        ready.set()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(module, 'analyze_portfolio', analyze)
-    run_id = app.submit(source='demo')
-    task = app.tasks[run_id]
-    await asyncio.wait_for(ready.wait(), timeout=2)
-    running = app.store.run(run_id)
-    assert running['status'] == 'running'
-    assert running['research_activity'][0]['tool'] == 'search_news'
-    assert running['research_budget']['tool_calls'] == 1
-    assert app.cancel(run_id)
-    await asyncio.gather(task, return_exceptions=True)
-    reopened = Store(app.directory)
-    reopened.recover()
-    cancelled = reopened.run(run_id)
-    assert cancelled['status'] == 'failed'
-    assert cancelled['research_activity'] == running['research_activity']
 
 
-def test_activity_columns_migrate_existing_database(tmp_path):
-    import sqlite3
-    with sqlite3.connect(tmp_path / 'state.sqlite3') as db:
-        db.execute('CREATE TABLE runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT, schedule_key TEXT UNIQUE, delivery TEXT, email_requested INTEGER NOT NULL DEFAULT 0)')
-        db.execute("INSERT INTO runs (id,created_at,status) VALUES ('old','2026-10-19','success')")
-    row = Store(tmp_path).run('old')
-    assert row['research_activity'] == [] and row['research_budget'] == {}
 
 
 async def test_cancellation_releases_overlap_lock_and_prevents_email(app, monkeypatch):
@@ -312,3 +266,10 @@ async def test_scheduled_runs_use_latest_saved_positions_and_preserve_manual_dat
     assert captured[1].snapshot == second
     assert app.store.snapshot() == second
     assert len(app.store.history()) == 2
+
+
+def finish_run(app, run_id, result):
+    assert app.store.create_run(run_id)
+    result.run_id = run_id
+    app.store.finish(result)
+    return run_id

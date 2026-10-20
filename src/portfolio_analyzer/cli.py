@@ -87,11 +87,11 @@ async def run_analysis(args, directory):
 
 
 async def diagnose(args, directory):
-    from .service import ApplicationService, build_dependencies, read_secret
+    from .service import ApplicationService, build_dependencies, resolve_model_key
     service = ApplicationService(directory, server=os.environ.get("PORTFOLIO_SERVER_MODE") == "1")
     settings = service.settings
     checks = {"snapshot_present": service.store.snapshot() is not None,
-              "model_enabled": settings.model_enabled, "model_credential_present": bool(read_secret(service.secrets, "model_api_key")),
+              "model_enabled": settings.model_enabled, "model_credential_present": bool(resolve_model_key(settings, service.secrets)[0]),
               "search_provider": settings.search_provider, "schedule_enabled": settings.schedule.enabled,
               "email_configured": settings.smtp is not None, "email_verified": bool(settings.smtp and service.store.get("verified_recipient") == settings.smtp.recipient)}
     if args.live:

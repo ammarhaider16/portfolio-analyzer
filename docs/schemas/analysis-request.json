@@ -148,6 +148,44 @@
           ],
           "default": null,
           "title": "Previous Close"
+        },
+        "price_as_of": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price As Of"
+        },
+        "price_session": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price Session"
+        },
+        "price_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price Source"
         }
       },
       "required": [
@@ -214,29 +252,29 @@
       "type": "string"
     },
     "max_searches": {
-      "default": 30,
-      "maximum": 30,
+      "default": 100,
+      "maximum": 500,
       "minimum": 0,
       "title": "Max Searches",
       "type": "integer"
     },
     "max_model_calls": {
-      "default": 8,
-      "maximum": 64,
+      "default": 64,
+      "maximum": 256,
       "minimum": 1,
       "title": "Max Model Calls",
       "type": "integer"
     },
     "max_tool_calls": {
-      "default": 40,
-      "maximum": 200,
+      "default": 200,
+      "maximum": 1000,
       "minimum": 0,
       "title": "Max Tool Calls",
       "type": "integer"
     },
     "max_seconds": {
-      "default": 120,
-      "maximum": 600,
+      "default": 600,
+      "maximum": 1800,
       "minimum": 1,
       "title": "Max Seconds",
       "type": "integer"

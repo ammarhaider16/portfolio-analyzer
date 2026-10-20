@@ -45,12 +45,10 @@ try {
   await evaluate(`document.querySelector('#research-form input[name=sec_contact]').value='Owner owner@example.com';document.querySelector('#research-form input[name=sec_contact]').dispatchEvent(new Event('input'));`);
   if(!(await evaluate('document.querySelector("#research-form input[name=sec_company_filings_enabled]").checked'))) throw new Error('First valid SEC contact did not enable filings');
   await evaluate('refresh(true)');
-  if(!(await evaluate('Array.from(document.querySelectorAll("#source-states .badge")).some(item=>item.textContent.startsWith("Federal Reserve:")) && Array.from(document.querySelectorAll("#source-states .badge")).some(item=>item.textContent.startsWith("BLS:")) && Array.from(document.querySelectorAll("#source-states .badge")).some(item=>item.textContent.startsWith("Nasdaq:"))'))) throw new Error('Source checks are not separated by actual feed');
-  await evaluate(`renderResearchActivity({id:'smoke-activity',status:'running',research_activity:[{tool:'asset_news',symbol:'VTI',query:'fund benchmark changes',source:'google_news',status:'passed',elapsed_seconds:1.25}],research_budget:{model_calls:2,tool_calls:3,max_tool_calls:40}})`);
-  if(!(await evaluate('!document.querySelector("#research-activity").hidden && document.querySelector("#activity-status").textContent.includes("running") && document.querySelector("#activity-entries").textContent.includes("VTI") && document.querySelector("#activity-budget").textContent.includes("Tool calls: 3")'))) throw new Error('Running tool activity or budget is missing');
-  await evaluate(`renderResearchActivity({id:'smoke-activity',status:'cancelled',research_activity:[{tool:'asset_news',symbol:'VTI',status:'passed'}]});renderReportSummary({result:{snapshot_as_of:'2026-10-19T16:00:00Z',executive_summary:{text:'The fund changed its benchmark.',evidence_ids:['s1']},sources:[{id:'s1',title:'Fund notice',url:'https://example.org/notice'}],coverage:{summary:'Source retrieval was incomplete'},metrics:{},findings:[]}})`);
-  if(!(await evaluate('document.querySelector("#activity-status").textContent.includes("cancelled") && document.querySelector("#report-summary .briefing-summary").textContent.includes("changed its benchmark") && document.querySelector("#report-summary .insight-sources a").textContent === "Fund notice" && document.querySelector("#report-coverage").textContent.startsWith("Research coverage:") && !document.querySelector("#report-summary").textContent.includes("Nothing needs your attention")'))) throw new Error('Summary, citation, coverage, or interrupted activity rendering is incorrect');
-  await evaluate('renderResearchActivity(null);document.querySelector("#report-summary").replaceChildren();document.querySelector("#report-coverage").textContent="";refresh(true)');
+  if(!(await evaluate('Array.from(document.querySelectorAll("#source-states .badge")).some(item=>item.textContent.startsWith("Federal Reserve:")) && Array.from(document.querySelectorAll("#source-states .badge")).some(item=>item.textContent.startsWith("Nasdaq:"))'))) throw new Error('Source checks are not separated by actual feed');
+  await evaluate(`renderResearchActivity({id:'smoke-activity',status:'running',research_activity:[{tool:'search_news',symbol:'VTI',query:'fund benchmark changes',status:'passed'}]})`);
+  if(!(await evaluate('!document.querySelector("#research-activity").hidden && document.querySelector("#activity-entries").textContent.includes("VTI") && !document.querySelector("#activity-budget")'))) throw new Error('Run trace is missing or resource counters are visible');
+  await evaluate('renderResearchActivity(null);refresh(true)');
   await evaluate(`state.secrets_present.tavily_api_key=true;state.secrets.tavily_api_key={present:true,source:'keyring',saved_at:new Date().toISOString(),provider:null,editable:true,managed_by:null,env:['PORTFOLIO_SECRET_TAVILY_API_KEY']};renderSecretFields(true)`);
   if(!(await evaluate('document.querySelector("#research-form input[name=key]").hidden && /key saved/i.test(document.querySelector("#tavily-fields .secret-status").textContent)'))) throw new Error('Saved research secret is not masked');
   await evaluate('document.querySelector("#tavily-fields .secret-status .secret-change").click()');
@@ -60,16 +58,14 @@ try {
   }
   const optional=await evaluate('state.settings.smtp === null && state.settings.schedule.enabled === false');
   if(!optional) throw new Error('Use a fresh smoke data directory with optional integrations disabled');
-  await evaluate("api('/api/settings',{search_provider:'disabled',primary_feeds_enabled:false,market_data_enabled:false,alpha_vantage_enabled:false,model_enabled:false}).then(()=>refresh())");
+  await evaluate("api('/api/settings',{search_provider:'disabled',primary_feeds_enabled:false,market_data_enabled:false,model_enabled:false}).then(()=>refresh())");
   await evaluate('document.querySelector("#run-form").requestSubmit()');
   await waitFor('Boolean(document.querySelector("#report-frame")?.getAttribute("src"))');
   if(!(await evaluate('Boolean(document.querySelector("#report-card").compareDocumentPosition(document.querySelector("#portfolio-editor")) & Node.DOCUMENT_POSITION_FOLLOWING)'))) throw new Error('Report is below the portfolio editor');
-  await evaluate('document.querySelector("#report-detail").open=true');
   await waitFor('Boolean(document.querySelector("#report-frame").contentDocument?.body?.textContent.trim())');
   await evaluate('document.querySelector("#report-card").hidden=true');
   await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}).then(data=>writeFile('.tools/dashboard.png',Buffer.from(data.data,'base64')));
-  await evaluate('document.querySelector(".nav[data-view=preferences]").click(); document.querySelector("#preferences-form").elements.max_searches.value="3"; document.querySelector("#preferences-form").requestSubmit()');
-  await waitFor('state.settings.max_searches === 3');
+  if(await evaluate('Boolean(document.querySelector("#preferences-form [name=max_searches]"))')) throw new Error('Technical limits should not appear in preferences');
   await evaluate('document.querySelector(".nav[data-view=connections]").click()');
   const files=await send('DOM.getDocument');
   const input=await send('DOM.querySelector',{nodeId:files.root.nodeId,selector:'#import-form input[type=file]'});
@@ -110,7 +106,8 @@ try {
   await waitFor(`state.history.length > ${initialRuns} && !state.history.some(row=>['queued','running'].includes(row.status))`);
   const storedReport=await evaluate('state.history[0].status');
   if(storedReport==='failed') throw new Error('Saved portfolio briefing failed');
-  await waitFor('document.querySelector("#report-coverage").textContent.includes("2 of 3 holdings valued")');
+  await waitFor('document.querySelector("#report-frame").contentDocument?.body?.textContent.includes("Executive summary")');
+  if(await evaluate('document.querySelector("#report-detail").tagName === "DETAILS"')) throw new Error('Report should be visible without expansion');
   if(!(await evaluate('document.querySelector("#value-coverage").textContent.includes("MSFT excluded") && document.querySelector("#allocation-note").textContent.includes("MSFT excluded")'))) throw new Error('Unpriced holding is not named beside allocation');
   if(!(await evaluate('document.querySelector("#cap-events").textContent.includes("Unavailable") && document.querySelector("#cap-model").textContent.includes("Unavailable")'))) throw new Error('Research capability is not explained before running');
   await evaluate('document.querySelector("#report-card").scrollIntoView()');
@@ -130,7 +127,7 @@ try {
   await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}).then(data=>writeFile('.tools/dashboard-mobile.png',Buffer.from(data.data,'base64')));
   await evaluate('document.querySelector("#report-card").hidden=false;document.querySelector("#report-card").scrollIntoView()');
   await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}).then(data=>writeFile('.tools/report-mobile.png',Buffer.from(data.data,'base64')));
-  if(!(await evaluate('document.querySelector("#report-card h2").textContent==="Latest briefing" && document.querySelectorAll("#report-card h2").length===1'))) throw new Error('Latest briefing title is missing or duplicated');
+  if(!((await evaluate('((heading)=>!!heading && (heading.textContent==="Latest briefing" || heading.textContent.startsWith("Previous briefing")))(document.querySelector("#report-heading")||document.querySelector("#report-card h2"))')) && (await evaluate('document.querySelectorAll("#report-card h2").length===1')))) throw new Error('Latest briefing title is missing or duplicated');
   if(!(await evaluate('document.querySelector("#report-frame").getAttribute("sandbox").includes("allow-popups")'))) throw new Error('Inline report frame cannot open source links');
   // The dismiss control is shared by every status banner.
   await evaluate(`notice('Smoke notice for dismissal.')`);

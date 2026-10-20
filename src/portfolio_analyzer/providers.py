@@ -2,6 +2,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
+import html
 import ipaddress
 import re
 import socket
@@ -98,7 +99,13 @@ async def retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool 
         return await _retrieve_public_text(url, max_bytes, raw=raw, user_agent=user_agent)
 
 
-async def _retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool = False, user_agent: str = "PortfolioResearch/1.0") -> str:
+async def retrieve_public_url(url: str, *, max_bytes: int = 2048, user_agent: str = "PortfolioResearch/1.0") -> str:
+    """Follow redirects with the pinned transport and return the landing URL."""
+    async with source_network_slot():
+        return await _retrieve_public_text(url, max_bytes, raw=True, user_agent=user_agent, landed=True)
+
+
+async def _retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool = False, user_agent: str = "PortfolioResearch/1.0", landed: bool = False) -> str:
     """Fetch with DNS pinning to close validation/connection rebinding gaps."""
     import http.client
     import ssl
@@ -192,7 +199,7 @@ async def _retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool
                 if active[0] is not None:
                     active[0].close()
                 active[0] = None
-    def fetch() -> str:
+    def fetch():
         remaining()  # Cancelled/expired queued work must never start a request.
         timer = threading.Timer(remaining(), stop)
         timer.daemon = True
@@ -206,7 +213,7 @@ async def _retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool
                 seen.add(current_url)
                 content, target = fetch_one(current_url)
                 if target is None:
-                    return content
+                    return content, current_url
                 current_url = target
             raise SourceAccessError("redirect", "Source redirect limit exceeded")
         except Exception as error:
@@ -217,7 +224,8 @@ async def _retrieve_public_text(url: str, max_bytes: int = 200_000, *, raw: bool
             timer.cancel()
     future = asyncio.get_running_loop().run_in_executor(_SOURCE_WORKERS, fetch)
     try:
-        return await asyncio.shield(future)
+        content, final_url = await asyncio.shield(future)
+        return final_url if landed else content
     except asyncio.CancelledError:
         stop()
         future.cancel()
@@ -228,7 +236,122 @@ def _evidence(url: str, title: str, excerpt: str) -> Evidence:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("Search returned an invalid source URL")
-    return Evidence(id=hashlib.sha256(url.encode()).hexdigest()[:16], url=url, title=title[:500], publisher=parsed.hostname, excerpt=excerpt[:5000])
+    from .news import clean_text, EXCERPT_LIMIT
+    return Evidence(id=hashlib.sha256(url.encode()).hexdigest()[:16], url=url, title=clean_text(title)[:500] or "Source",
+                    publisher=parsed.hostname, excerpt=clean_text(excerpt)[:EXCERPT_LIMIT])
+
+
+def is_aggregator_url(url: str) -> bool:
+    """True only for redirector/aggregator hosts, never for publisher or mirror hosts."""
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    if not host:
+        return False
+    return (host == "bing.com" or host.endswith(".bing.com") or host == "google.com"
+            or host.endswith(".google.com") or host.startswith("news.google."))
+
+
+def _google_article_target(link: str) -> str:
+    """Decode the publisher URL embedded in older news.google.com article ids when present."""
+    import base64
+    parsed = urlparse(link)
+    if not (parsed.hostname or "").lower().startswith("news.google.") or "/articles/" not in parsed.path:
+        return ""
+    token = parsed.path.rsplit("/articles/", 1)[1].split("/", 1)[0]
+    try:
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    except (ValueError, TypeError):
+        return ""
+    match = re.search(rb"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]{6,500}", raw)
+    if not match:
+        return ""
+    target = match.group(0).decode("ascii", "ignore").rstrip(".,;)")
+    return target if target.startswith("https://") and not is_aggregator_url(target) else ""
+
+
+def _summary_link(summary: str) -> str:
+    """First publisher link in a feed description, ignoring aggregator redirect markup."""
+    for href in re.findall(r"""href=["']([^"']+)["']""", html.unescape(summary or "")):
+        href = href.strip()
+        if href.startswith("https://") and not is_aggregator_url(href):
+            return href
+    return ""
+
+
+async def resolve_feed_link(url: str) -> str:
+    """Best-effort aggregator redirect resolution with a short timeout; "" when unresolved."""
+    if not is_aggregator_url(url):
+        return url
+    try:
+        landed = await asyncio.wait_for(retrieve_public_url(url), timeout=3.0)
+    except Exception:
+        return ""
+    return landed if landed.startswith("https://") and not is_aggregator_url(landed) else ""
+
+
+async def resolve_feed_links(items: list[Evidence], budget: float = 4.0) -> list[Evidence]:
+    """Replace aggregator links with publisher pages at ingestion when resolvable."""
+    pending = [item for item in items if is_aggregator_url(item.url)]
+    if not pending:
+        return items
+    async def one(item):
+        return item, await resolve_feed_link(item.url)
+    try:
+        async with asyncio.timeout(budget):
+            outcomes = await asyncio.gather(*(one(item) for item in pending), return_exceptions=True)
+    except TimeoutError:
+        return items
+    resolved_by_id = {}
+    for outcome in outcomes:
+        if isinstance(outcome, tuple):
+            item, resolved = outcome
+            if resolved:
+                resolved_by_id[item.id] = resolved
+    from urllib.parse import urlparse as _urlparse
+    updated = []
+    for item in items:
+        resolved = resolved_by_id.get(item.id)
+        if not resolved:
+            updated.append(item)
+            continue
+        update = {"url": resolved}
+        # The landing host is the true publisher when the feed only named an aggregator.
+        if not item.publisher or is_aggregator_url(f"https://{item.publisher}"):
+            update["publisher"] = _urlparse(resolved).hostname or item.publisher
+        updated.append(item.model_copy(update=update))
+    return updated
+
+
+def _count_hygiene(provider, counts: dict) -> None:
+    if not counts:
+        return
+    if not hasattr(provider, "hygiene_counts"):
+        provider.hygiene_counts = {}
+    for key, value in counts.items():
+        provider.hygiene_counts[key] = provider.hygiene_counts.get(key, 0) + value
+
+
+def source_hygiene_counts(provider) -> dict:
+    """Per-run ingestion filter counts, including nested adapters, for engine diagnostics."""
+    if provider is None:
+        return {}
+    result = dict(getattr(provider, "hygiene_counts", {}))
+    for child in list(getattr(provider, "providers", [])) + [getattr(provider, "fallback", None)]:
+        for key, value in source_hygiene_counts(child).items():
+            result[key] = result.get(key, 0) + value
+    return result
+
+
+def _hygiene_filter(items, reference=None, max_age_hours=None):
+    from .news import source_hygiene
+    return source_hygiene(items, reference=reference, max_age_hours=max_age_hours)
+
+
+async def _finalize_sources(provider, items, reference=None):
+    """FR-16 hygiene then FR-4 link resolution, before evidence registration."""
+    kept, counts = _hygiene_filter(items, reference=reference,
+                                   max_age_hours=getattr(provider, "max_data_age_hours", None))
+    _count_hygiene(provider, counts)
+    return await resolve_feed_links(kept)
 
 
 class TavilyResearchProvider:
@@ -269,7 +392,7 @@ class TavilyResearchProvider:
                     if published:
                         source.published_at = published if published.tzinfo else published.replace(tzinfo=timezone.utc)
                 results.append(source)
-            return results
+            return await resolve_feed_links(results)
 
     async def retrieve(self, source: Evidence) -> Evidence:
         content = await retrieve_public_text(source.url)
@@ -281,7 +404,7 @@ class DDGSResearchProvider:
         def search():
             from ddgs import DDGS
             return [_evidence(row["href"], row.get("title", "Source"), row.get("body", "")) for row in DDGS(timeout=15).text(query, max_results=max_results)]
-        return await _run_source_worker(search)
+        return await resolve_feed_links(await _run_source_worker(search))
 
     async def retrieve(self, source: Evidence) -> Evidence:
         content = await retrieve_public_text(source.url)
@@ -291,13 +414,11 @@ class DDGSResearchProvider:
 class YFinanceMarketDataProvider:
     def __init__(self, refresh_existing: bool = True):
         self.refresh_existing = refresh_existing
+        self._info_cache = {}
 
     async def resolve_instrument(self, symbol: str) -> dict | None:
         """Return exact-symbol quote identity, or abstain on missing/ambiguous data."""
-        def fetch():
-            import yfinance as yf
-            return yf.Ticker(symbol).get_info()
-        info = await _run_source_worker(fetch)
+        info = await self._info(symbol)
         if not isinstance(info, dict) or str(info.get("symbol", "")).upper() != symbol.upper():
             return None
         type_map = {"EQUITY": "stock", "ETF": "etf", "MUTUALFUND": "mutual_fund", "INDEX": "index"}
@@ -315,68 +436,78 @@ class YFinanceMarketDataProvider:
         result, _ = await self.enrich_with_metadata(snapshot)
         return result
 
-    async def enrich_with_metadata(self, snapshot: PortfolioSnapshot) -> tuple[PortfolioSnapshot, dict]:
-        """Keep quote observation dates separate from snapshot collection time."""
-        from datetime import datetime, timezone
-        result = snapshot.model_copy(deep=True)
-        metadata = {}
-        def fetch(symbol):
+    async def _info(self, symbol):
+        cached = self._info_cache.get(symbol)
+        if cached and time.monotonic()-cached[0] < 30:
+            return cached[1]
+        def fetch():
             import yfinance as yf
-            return yf.Ticker(symbol).history(period="5d", auto_adjust=False, timeout=10)
+            return yf.Ticker(symbol).get_info()
+        info = await _run_source_worker(fetch)
+        self._info_cache[symbol] = (time.monotonic(), info)
+        return info
+
+    async def enrich_with_metadata(self, snapshot: PortfolioSnapshot) -> tuple[PortfolioSnapshot, dict]:
+        from datetime import date
+        result = snapshot.model_copy(deep=True)
+        symbols = [position.symbol for position in result.positions if self.refresh_existing or position.price is None]
+        quotes = await self.quotes(symbols)
+        metadata = {}
         for position in result.positions:
-            if self.refresh_existing or position.price is None:
-                history = await _run_source_worker(fetch, position.symbol)
-                if not history.empty:
-                    from decimal import Decimal
-                    position.price = Decimal(str(history["Close"].iloc[-1]))
-                    metadata[position.symbol] = {"source": "yfinance", "valuation_type": "daily_close", "trading_date": str(history.index[-1].date()), "retrieved_at": datetime.now(timezone.utc).isoformat()}
-                    if len(history) > 1:
-                        position.previous_close = Decimal(str(history["Close"].iloc[-2]))
+            quote = quotes.get(position.symbol)
+            if not quote or not quote_is_newer(quote, position):
+                continue
+            position.price, position.previous_close = quote['price'], quote['previous_close']
+            position.price_session = date.fromisoformat(quote['trading_date'])
+            position.price_as_of = datetime.fromisoformat(quote['quote_as_of']) if quote.get('quote_as_of') else None
+            position.price_source = quote['source']
+            metadata[position.symbol] = {key:value for key,value in quote.items() if key not in {'price','previous_close'}}
         return result, metadata
 
     async def quotes(self, symbols: list[str]) -> dict[str, dict]:
-        """Fetch daily-close quotes for many symbols in one batched yfinance request.
-
-        Returns per-symbol ``price``, ``previous_close``, ``trading_date``,
-        ``retrieved_at`` and ``source``. Symbols the provider does not return, or
-        rows without a usable close, are omitted rather than invented.
-        """
-        unique = list(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()))
-        if not unique:
-            return {}
-
-        def fetch():
-            import yfinance as yf
-            return yf.download(" ".join(unique), period="5d", interval="1d", auto_adjust=False,
-                               progress=False, threads=True, group_by="ticker", timeout=10)
-
-        try:
-            data = await _run_source_worker(fetch)
-        except Exception:
-            return {}
-        if data is None or getattr(data, "empty", True):
-            return {}
-        from decimal import Decimal
-        retrieved_at = datetime.now(timezone.utc).isoformat()
-        multi = getattr(data.columns, "nlevels", 1) > 1
-        quotes = {}
-        for symbol in unique:
+        """Use timestamped regular-session quotes, falling back honestly to dated closes."""
+        from zoneinfo import ZoneInfo
+        unique = list(dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip()))
+        async def one(symbol):
+            now = datetime.now(timezone.utc)
+            candidate = None
             try:
-                series = data[(symbol, "Close")] if multi else data["Close"]
-            except (KeyError, TypeError):
-                continue
-            series = series.dropna()
-            if series.empty:
-                continue
+                async with asyncio.timeout(15):
+                    info = await self._info(symbol)
+                price = valid_market_price(info.get('regularMarketPrice'))
+                previous = valid_market_price(info.get('regularMarketPreviousClose',info.get('previousClose')))
+                stamp = info.get('regularMarketTime')
+                if price is not None and isinstance(stamp,(int,float)) and stamp > 0:
+                    observed = datetime.fromtimestamp(stamp,timezone.utc)
+                    zone = ZoneInfo(info.get('exchangeTimezoneName') or 'America/New_York')
+                    if observed <= now:
+                        candidate = {'price':price, 'previous_close':previous,
+                            'trading_date':observed.astimezone(zone).date().isoformat(),
+                            'quote_as_of':observed.isoformat(), 'retrieved_at':now.isoformat(),
+                            'source':'yfinance', 'valuation_type':'regular_session'}
+                        if candidate['trading_date'] >= expected_market_session(now):
+                            return symbol, candidate
+            except Exception:
+                pass
+            def fetch():
+                import yfinance as yf
+                return yf.Ticker(symbol).history(period='5d',interval='1d',auto_adjust=False,timeout=10)
             try:
-                price = Decimal(str(series.iloc[-1]))
-                trading_date = str(series.index[-1].date())
-                previous_close = Decimal(str(series.iloc[-2])) if len(series) > 1 else None
-            except (ValueError, ArithmeticError, IndexError):
-                continue
-            quotes[symbol] = {"price": price, "previous_close": previous_close, "trading_date": trading_date,
-                              "retrieved_at": retrieved_at, "source": "yfinance"}
-        return quotes
+                history = await _run_source_worker(fetch)
+                series = history['Close'].dropna()
+                series = series[series.map(lambda value:valid_market_price(value) is not None)]
+                if series.empty:
+                    return symbol, candidate
+                if candidate and candidate['trading_date'] >= str(series.index[-1].date()):
+                    return symbol, candidate
+                return symbol, {'price':valid_market_price(series.iloc[-1]),
+                    'previous_close':valid_market_price(series.iloc[-2]) if len(series)>1 else None,
+                    'trading_date':str(series.index[-1].date()), 'quote_as_of':None,
+                    'retrieved_at':now.isoformat(), 'source':'yfinance', 'valuation_type':'daily_close'}
+            except Exception:
+                return symbol, candidate
+        values = await asyncio.gather(*(one(symbol) for symbol in unique))
+        return {symbol:quote for symbol,quote in values if quote}
 
     async def history(self, snapshot: PortfolioSnapshot) -> dict[str, dict[str, float]]:
         def fetch(symbol):
@@ -389,6 +520,44 @@ class YFinanceMarketDataProvider:
             if history:
                 results[symbol] = history
         return results
+
+
+def quote_is_newer(quote, position):
+    """Never downgrade a stored observation to an older session or timestamp."""
+    session = quote.get('trading_date')
+    if position.price_session:
+        saved = position.price_session.isoformat()
+        if not session or session < saved:
+            return False
+        if session == saved and position.price_as_of:
+            stamp = quote.get('quote_as_of')
+            return bool(stamp and datetime.fromisoformat(stamp) >= position.price_as_of)
+    return True
+
+
+def expected_market_session(now=None):
+    """The US session currently trading, or the last session before today's open."""
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    import exchange_calendars as calendars
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone(ZoneInfo('America/New_York'))
+    calendar = calendars.get_calendar('XNYS', start=(local.date()-timedelta(days=40)).isoformat(),
+                                     end=(local.date()+timedelta(days=10)).isoformat())
+    session = calendar.date_to_session(local.date().isoformat(), direction='previous')
+    if calendar.session_open(session).to_pydatetime() > now:
+        session = calendar.previous_session(session)
+    return session.date().isoformat()
+
+
+def valid_market_price(value):
+    """Accept only finite positive provider quotes before they reach mutable models."""
+    from decimal import Decimal, InvalidOperation
+    try:
+        price = Decimal(str(value))
+        return price if price.is_finite() and price > 0 else None
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
 
 class PrimaryFeedResearchProvider:
@@ -406,6 +575,8 @@ class PrimaryFeedResearchProvider:
         self._feed_lock = asyncio.Lock()
         self._last_sec_request = 0.0
         self.source_outcomes = {}
+        self.hygiene_counts = {}
+        self.max_data_age_hours = None
         self.sources = tuple(source for source in (sources if sources is not None else self.FEEDS) if source in self.FEEDS)
 
     async def _fetch(self, url: str, *, raw: bool = False) -> str:
@@ -473,6 +644,9 @@ class PrimaryFeedResearchProvider:
                 record_outcome(self.fallback, _source_id(self.fallback), "passed" if len(found) > before_fallback else "empty", "" if len(found) > before_fallback else "No matching updates")
             except Exception as error:
                 record_outcome(self.fallback, _source_id(self.fallback), "failed", safe_source_error(error))
+        found, counts = _hygiene_filter(found, reference=reporting_cutoff,
+                                        max_age_hours=getattr(self, "max_data_age_hours", None))
+        _count_hygiene(self, counts)
         return found[:max_results]
 
     async def search_events(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
@@ -581,6 +755,23 @@ def _entry_publisher(entry, fallback: str) -> str:
     return fallback
 
 
+def _entry_source_url(entry) -> str:
+    """The RSS source element link; a full publisher path can replace an aggregator redirect."""
+    for child in list(entry):
+        if _local_name(child.tag) != "source":
+            continue
+        url = (child.get("url") or "").strip()
+        if url.startswith("https://") and urlparse(url).path not in ("", "/"):
+            return url
+    return ""
+
+
+def _title_publisher(title: str) -> str:
+    from .news import clean_text
+    match = re.match(r"^.*\s+[|–—-]\s+(\S(?:.*\S)?)$", clean_text(title))
+    return match.group(1).strip() if match else ""
+
+
 def _entry_tickers(entry) -> set[str]:
     tickers: set[str] = set()
     for child in entry.iter():
@@ -629,6 +820,8 @@ class SecFilingsResearchProvider:
         self._tickers_lock = asyncio.Lock()
         self._last_sec_request = 0.0
         self.source_outcomes = {}
+        self.hygiene_counts = {}
+        self.max_data_age_hours = None
         if not self._enabled():
             record_outcome(self, "sec_filings", "skipped", "SEC filings were not checked because an identifying contact is missing or invalid")
 
@@ -713,6 +906,9 @@ class SecFilingsResearchProvider:
                 excerpt=f"{label} filed a {form} on {dates[index]}."[:5000], content_type="official_feed"))
             if len(results) >= max_results:
                 break
+        results, counts = _hygiene_filter(results, reference=reporting_cutoff,
+                                          max_age_hours=getattr(self, "max_data_age_hours", None))
+        _count_hygiene(self, counts)
         record_outcome(self, "sec_filings", "passed" if results else "empty", "" if results else "No matching recent filings")
         return results
 
@@ -745,6 +941,9 @@ class TickerNewsFeedProvider:
         self.timeout = timeout
         self.ttl = ttl
         self.fallback = fallback
+        # Optional freshness window (hours); with none set, only the 30-day hard rule applies.
+        self.max_data_age_hours = None
+        self.hygiene_counts = {}
         self._cache: dict[str, tuple[float, str]] = {}
         self._lock = asyncio.Lock()
 
@@ -784,14 +983,27 @@ class TickerNewsFeedProvider:
             tickers = _entry_tickers(entry)
             if not tickers or not symbol or symbol.upper() not in tickers:
                 return None
+        from .news import clean_feed_title, clean_text, EXCERPT_LIMIT
         title = _entry_value(entry, "title") or "News update"
         summary = _entry_value(entry, "description", "summary", "content")
+        # FR-4: prefer the publisher page over an aggregator redirect when the feed carries it.
+        if is_aggregator_url(link):
+            for candidate in (_summary_link(summary), _google_article_target(link), _entry_source_url(entry)):
+                if candidate and candidate.startswith("https://") and not is_aggregator_url(candidate):
+                    link = candidate
+                    break
         host = urlparse(link).hostname or "news"
-        publisher = _entry_publisher(entry, host)
-        label = " ".join(part for part in (symbol, name) if part).strip()
-        excerpt = f"{label}: {summary}" if label else summary
-        return Evidence(id=hashlib.sha256(link.encode()).hexdigest()[:16], url=link, title=title[:500],
-                        publisher=publisher[:200], published_at=published, excerpt=excerpt.strip()[:5000],
+        publisher = _entry_publisher(entry, "")
+        if not publisher and not is_aggregator_url(link):
+            publisher = host
+        if not publisher:
+            # Unresolved aggregator link: the title suffix still names the true publisher.
+            publisher = _title_publisher(title) or host
+        # FR-5: evidence fields carry the item's own text only; never the queried symbol/name.
+        return Evidence(id=hashlib.sha256(link.encode()).hexdigest()[:16], url=link,
+                        title=clean_feed_title(title, publisher)[:500],
+                        publisher=publisher[:200], published_at=published,
+                        excerpt=clean_text(summary)[:EXCERPT_LIMIT],
                         content_type="news_feed")
 
     async def _source_entries(self, source: str, query: str, symbol: str, name: str | None, reporting_cutoff) -> list[Evidence]:
@@ -838,7 +1050,7 @@ class TickerNewsFeedProvider:
                 groups.append((await _probe_call(self.fallback, query, max_results=min(max_results, 12), reporting_cutoff=reporting_cutoff))[:12])
             except Exception as error:
                 record_outcome(self.fallback, _source_id(self.fallback), "failed", safe_source_error(error))
-        return _interleave_candidates(groups)
+        return await _finalize_sources(self, _interleave_candidates(groups), reference=reporting_cutoff)
 
     async def search_symbol(self, symbol: str, name: str | None = None, max_results: int = 4, reporting_cutoff=None) -> list[Evidence]:
         symbol = (symbol or "").strip().upper()
@@ -860,8 +1072,8 @@ class TickerNewsFeedProvider:
                 seen.add(entry.url)
                 results.append(entry)
                 if len(results) >= max_results:
-                    return results
-        return await self._supplement(query, seen, results, max_results, reporting_cutoff)
+                    return await _finalize_sources(self, results, reference=reporting_cutoff)
+        return await _finalize_sources(self, await self._supplement(query, seen, results, max_results, reporting_cutoff), reference=reporting_cutoff)
 
     async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
         return await self._generic(query, max_results, None)
@@ -888,8 +1100,8 @@ class TickerNewsFeedProvider:
                 seen.add(entry.url)
                 results.append(entry)
                 if len(results) >= max_results:
-                    return results
-        return await self._supplement(query, seen, results, max_results, reporting_cutoff)
+                    return await _finalize_sources(self, results, reference=reporting_cutoff)
+        return await _finalize_sources(self, await self._supplement(query, seen, results, max_results, reporting_cutoff), reference=reporting_cutoff)
 
     async def _supplement(self, query, seen, results, max_results, reporting_cutoff):
         if self.fallback is None or len(results) >= max_results:
@@ -916,6 +1128,8 @@ class CompositeResearchProvider:
 
     def __init__(self, providers):
         self.providers = [provider for provider in providers if provider is not None]
+        self.hygiene_counts = {}
+        self.max_data_age_hours = None
 
     async def search_symbol_candidates(self, symbol, name=None, max_results=12, reporting_cutoff=None):
         return await self._candidates("search_symbol", symbol, name=name, max_results=max_results, reporting_cutoff=reporting_cutoff)
@@ -950,7 +1164,7 @@ class CompositeResearchProvider:
         # Flatten fallback/feed adapters so each source has an independent bound.
         adapters = [adapter for child in self.providers for adapter in research_tool_sources(child).values()]
         groups = await _partial_source_groups(collect(adapter) for adapter in adapters)
-        return _interleave_candidates(groups)
+        return await _finalize_sources(self, _interleave_candidates(groups), reference=reporting_cutoff)
 
     async def search(self, query: str, max_results: int = 3) -> list[Evidence]:
         results: list[Evidence] = []
@@ -962,7 +1176,7 @@ class CompositeResearchProvider:
                 results.extend(await search(query, max_results=max_results))
             except Exception:
                 continue
-        return _dedupe_sources(results)[:max_results]
+        return await _finalize_sources(self, _dedupe_sources(results)[:max_results])
 
     async def search_events(self, query: str, max_results: int = 3, reporting_cutoff=None) -> list[Evidence]:
         results: list[Evidence] = []
@@ -975,7 +1189,7 @@ class CompositeResearchProvider:
                     results.extend(await provider.search(query, max_results=max_results))
             except Exception:
                 continue
-        return _dedupe_sources(results)[:max_results]
+        return await _finalize_sources(self, _dedupe_sources(results)[:max_results], reference=reporting_cutoff)
 
     async def search_symbol(self, symbol: str, name: str | None = None, max_results: int = 4, reporting_cutoff=None) -> list[Evidence]:
         results: list[Evidence] = []
@@ -988,7 +1202,7 @@ class CompositeResearchProvider:
                     results.extend(await handler(symbol, name, max_results=max_results, reporting_cutoff=reporting_cutoff))
             except Exception:
                 continue
-        return _dedupe_sources(results)[:max_results]
+        return await _finalize_sources(self, _dedupe_sources(results)[:max_results], reference=reporting_cutoff)
 
     async def retrieve(self, source: Evidence) -> Evidence:
         # Official and headline evidence is trusted as supplied; never fetch an aggregator page.
@@ -1013,10 +1227,6 @@ def supports_market_wide(provider) -> bool:
     if explicit is not None:
         return bool(explicit)
     return any(hasattr(provider, method) for method in ("search", "search_events", "search_events_candidates"))
-
-
-# Public alias used by the engine; retained alongside the capability-oriented name.
-supports_market_news = supports_market_wide
 
 
 def _source_id(provider):
@@ -1071,9 +1281,6 @@ def research_tool_sources(provider) -> dict:
     return result
 
 
-research_source_registry = research_tool_sources
-
-
 async def search_asset_query(provider, symbol, name, query, max_results=6, reporting_cutoff=None):
     """Keep explicit asset identity and the analyst's research focus together."""
     if isinstance(provider, CompositeResearchProvider):
@@ -1088,9 +1295,10 @@ async def search_asset_query(provider, symbol, name, query, max_results=6, repor
                     record_outcome(adapter, source, "failed", safe_source_error(error))
                 return []
         groups = await _partial_source_groups(collect(adapter) for child in provider.providers for adapter in research_tool_sources(child).values())
-        return _interleave_candidates(groups)
+        return await _finalize_sources(provider, _interleave_candidates(groups), reference=reporting_cutoff)
     async with source_network_slot():
-        return await _search_asset_leaf(provider, symbol, name, query, max_results, reporting_cutoff)
+        return await _finalize_sources(provider, await _search_asset_leaf(provider, symbol, name, query, max_results, reporting_cutoff),
+                                       reference=reporting_cutoff)
 
 
 async def _search_asset_leaf(provider, symbol, name, query, max_results, reporting_cutoff):
@@ -1163,5 +1371,3 @@ async def probe_research_sources(provider, symbol="AAPL", name=None) -> dict:
         record_outcome(provider, source_id, "skipped", "No source feeds selected")
         results = source_diagnostics(provider)
     return results
-
-

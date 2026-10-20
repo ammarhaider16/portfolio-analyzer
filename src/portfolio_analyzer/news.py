@@ -1,116 +1,183 @@
-"""Deterministic story clustering and editorial ordering; never upgrades evidence."""
+"""Source text cleanup and duplicate removal before analyst research."""
+
+import html
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 
-_MAJOR = {"reuters.com", "apnews.com", "bloomberg.com", "ft.com", "wsj.com", "cnbc.com", "bbc.com"}
-_SECONDARY = {"news.google.com", "finance.yahoo.com", "businessinsider.com", "marketbeat.com", "insidermonkey.com", "fool.com", "seekingalpha.com"}
-_PUBLISHER_DOMAINS = {"reuters": "reuters.com", "associated press": "apnews.com", "bloomberg": "bloomberg.com",
-                      "cnbc": "cnbc.com", "business insider": "businessinsider.com", "yahoo finance": "finance.yahoo.com"}
-_EVENTS = {
-    "earnings": r"\b(?:earnings|quarterly results|reports? results|beats? .*estimates|misses? .*estimates)\b",
-    "guidance": r"\b(?:guidance|outlook (?:cut|raised|lowered)|raises? forecast|cuts? forecast)\b",
-    "filing": r"\b(?:8-k|10-q|10-k|sec filing|files? with sec)\b",
-    "corporate_action": r"\b(?:acquisition|merger|dividend|stock split|buyback|bankruptcy)\b",
-    "legal": r"\b(?:court|ruling|lawsuit|regulator|regulatory|antitrust|settlement|fined)\b",
+EXCERPT_LIMIT = 5000
+_TAG = re.compile(r"<!--.*?-->|</?[A-Za-z][^>]{0,500}>", re.S)
+_WHITESPACE = re.compile(r"\s+")
+_SEPARATOR = re.compile(r"^(.*\S)\s+[|–—-]\s+(\S(?:.*\S)?)$")
+
+
+def clean_text(value: str) -> str:
+    """Plain visible text: markup and entities are never part of an evidence field."""
+    if not value:
+        return ""
+    text = html.unescape(str(value))
+    text = _WHITESPACE.sub(" ", _TAG.sub(" ", html.unescape(_TAG.sub(" ", text))))
+    return text.strip()
+
+
+def _alnum(value: str) -> str:
+    return re.sub(r"\W", "", (value or "").casefold())
+
+
+_ATTRIBUTION_QUALIFIERS = {
+    "the",
+    "and",
+    "com",
+    "www",
+    "ca",
+    "uk",
+    "au",
+    "in",
+    "us",
+    "usa",
+    "america",
+    "canada",
+    "australia",
+    "india",
+    "europe",
+    "international",
+    "global",
+    "staff",
+    "wire",
+    "news",
 }
-_OPINION = re.compile(r"\b(?:could|should|might|opinion|why|is it time|what .+ telling|next leg|stocks? to buy)\b", re.I)
 
 
-def publisher_label(source):
-    """Small documented tiers: official domains, major newsrooms, secondary, unknown."""
-    host = (urlsplit(source.url).hostname or "").lower().removeprefix("www.")
-    publisher = (source.publisher or "").lower().strip().removeprefix("www.")
-    # This is publisher-declared metadata, never a verified redirect destination.
-    # Feed publisher fields commonly contain a domain even when the URL is an aggregator.
-    if host in {"news.google.com", "www.bing.com", "bing.com"} and re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", publisher):
-        host = publisher
-    elif host in {"news.google.com", "bing.com"} and publisher in _PUBLISHER_DOMAINS:
-        host = _PUBLISHER_DOMAINS[publisher]
-    if host.endswith(".gov") or source.content_type == "official_feed":
-        tier = "official"
-    elif any(host == domain or host.endswith("." + domain) for domain in _MAJOR):
-        tier = "major"
-    elif any(host == domain or host.endswith("." + domain) for domain in _SECONDARY):
-        tier = "secondary"
-    else:
-        tier = "unknown"
-    return host, tier
+def clean_feed_title(title: str, publisher: str = "") -> str:
+    """Item title with a trailing feed attribution removed only when it duplicates the publisher."""
+    cleaned = clean_text(title)[:500]
+    match = _SEPARATOR.match(cleaned)
+    if not match or not publisher:
+        return cleaned
+    suffix, owner = _alnum(match.group(2)), _alnum(publisher)
+    words = set(re.findall(r"[a-z0-9]+", match.group(2).casefold()))
+    duplicated = bool(suffix and owner and (suffix in owner or owner in suffix)) or (
+        bool(words)
+        and words <= set(re.findall(r"[a-z0-9]+", (publisher or "").casefold())) | _ATTRIBUTION_QUALIFIERS
+    )
+    return match.group(1).strip() if duplicated else cleaned
 
 
-def normalized_title(source):
-    title = source.title.casefold()
-    # Strip a trailing feed attribution, preserving hyphenated event names (8-K).
-    parts = re.split(r"\s+[|–—-]\s+", title)
-    if len(parts) > 1:
-        suffix = re.sub(r"\W", "", parts[-1])
-        publisher = re.sub(r"\W", "", source.publisher.casefold())
-        known = {"reuters", "businessinsider", "yahoofinance", "cnbc", "bloomberg", "marketbeat"}
-        if suffix in known or suffix and (suffix in publisher or publisher in suffix):
-            title = " ".join(parts[:-1])
-    return " ".join(re.findall(r"[\w]+", title))
+# Ingestion hygiene (FR-16): quote widgets, derivatives pages, 13F scraps, mirror duplicates, staleness.
+_MIRROR_BASES = (
+    "finance.yahoo.com",
+    "fool.com",
+    "seekingalpha.com",
+    "marketwatch.com",
+    "investing.com",
+    "benzinga.com",
+    "zacks.com",
+)
+_SOURCE_WORDS = {
+    "yahoo",
+    "finance",
+    "fool",
+    "motley",
+    "marketwatch",
+    "seekingalpha",
+    "seeking",
+    "alpha",
+    "investing",
+    "benzinga",
+    "zacks",
+    "reuters",
+    "cnbc",
+    "bloomberg",
+    "ap",
+    "insider",
+    "monkey",
+    "nasdaq",
+    "barrons",
+    "edition",
+} | _ATTRIBUTION_QUALIFIERS
+_WIDGET_TITLE = re.compile(r"options? chain|interactive (?:stock )?chart|stock quote", re.I)
+_QUOTE_LABEL = re.compile(r"^\s*[A-Z][A-Z.\-]{0,7}\s+(?:Stock\s+)?(?:Quote|Chart|Options?)\b")
+_WIDGET_PATH = re.compile(r"/(?:options?-?chain|options?|quotes?|charts?)(?:/|$)", re.I)
 
 
-def event_types(source):
-    return {name for name, pattern in _EVENTS.items() if re.search(pattern, source.title, re.I)}
+def _host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower().removeprefix("www.")
 
 
-def evidence_grade(source):
-    return "full" if source.content_type in {"official_feed", "retrieved_page"} else "headline" if source.content_type == "news_feed" else None
+def mirror_family(url: str) -> str | None:
+    """Publisher base whose country mirrors repeat the same story, or None for independent hosts."""
+    host = _host(url)
+    for base in _MIRROR_BASES:
+        if host == base or host.endswith("." + base):
+            return base
+    return None
 
 
-def _rank(source):
-    category = bool(source.published_at and event_types(source) and not _OPINION.search(source.title))
-    _, tier = publisher_label(source)
-    grade = {"full": 0, "headline": 1, None: 2}[evidence_grade(source)]
-    return (not category, grade, {"official": 0, "major": 1, "secondary": 2, "unknown": 3}[tier],
-            -(source.published_at.timestamp() if source.published_at else 0), source.url, source.id)
-
-
-def _same_story(left, right):
-    if not left.published_at or not right.published_at or abs((left.published_at - right.published_at).total_seconds()) > 48 * 3600:
-        return False
-    a, b = normalized_title(left), normalized_title(right)
-    # Different figures/directions or event classes signal distinct updates.
-    if set(re.findall(r"\d+(?:\.\d+)?", a)) != set(re.findall(r"\d+(?:\.\d+)?", b)):
-        return False
-    if event_types(left) != event_types(right):
-        return False
-    def directions(text):
-        tokens = re.findall(r"\b(?:beats?|misses?|raises?|cuts?|rises?|falls?)\b", text)
-        canonical = {"beat": "beat", "beats": "beat", "miss": "miss", "misses": "miss",
-                     "raise": "raise", "raises": "raise", "cut": "cut", "cuts": "cut",
-                     "rise": "rise", "rises": "rise", "fall": "fall", "falls": "fall"}
-        return {canonical[token] for token in tokens}
-    if directions(a) != directions(b):
-        return False
-    if a == b:
-        return True
-    def shingles(text):
-        words = text.split()
-        return set(zip(words, words[1:])) if len(words) > 1 else set(words)
-    first, second = shingles(a), shingles(b)
-    return bool(first | second) and len(first & second) / len(first | second) >= 0.65
-
-
-def cluster_stories(sources, symbol):
-    """Return all ranked stories, retaining every member's evidence reference."""
-    groups = []
-    for source in sorted(sources, key=_rank):
-        group = next((items for items in groups if all(_same_story(source, member) for member in items)), None)
-        if group is None:
-            groups.append([source])
+def story_key(source, family: str = "") -> str:
+    """Normalized title for duplicate-story comparison, dropping feed attribution tails."""
+    parts = re.split(r"\s+[|–—-]\s+", clean_text(source.title).casefold())
+    family_words = set(re.findall(r"[a-z0-9]+", family or ""))
+    while len(parts) > 1 and len(parts[-1].split()) <= 4:
+        words = set(re.findall(r"[a-z0-9]+", parts[-1]))
+        if words <= _SOURCE_WORDS or (family_words and words & family_words):
+            parts.pop()
         else:
-            group.append(source)
-    stories = []
-    for members in groups:
-        representative = min(members, key=_rank)
-        domain, tier = publisher_label(representative)
-        grades = {evidence_grade(member) for member in members}
-        stories.append({"representative_source_id": representative.id,
-                        "member_source_ids": [member.id for member in members],
-                        "related_report_count": len(members) - 1, "affected_symbols": [symbol],
-                        "evidence_grade": "full" if "full" in grades else "headline" if "headline" in grades else None,
-                        "category": "event" if representative.published_at and event_types(representative) and not _OPINION.search(representative.title) else "also",
-                        "publisher_domain": domain, "publisher_tier": tier})
-    return stories
+            break
+    return " ".join(re.findall(r"[\w]+", " ".join(parts)))
+
+
+def _junk_reason(source):
+    # Exclude quote/derivative widgets, not analyst opinions or research topics.
+    probe = f"{source.title or ''} {source.url or ''}"
+    return (
+        "quote_pages"
+        if _WIDGET_TITLE.search(probe)
+        or _QUOTE_LABEL.search(source.title or "")
+        or _WIDGET_PATH.search(source.url or "")
+        else None
+    )
+
+
+def _mirror_dedupe(sources):
+    kept, dropped, seen = [], 0, {}
+    for source in sources:
+        family = mirror_family(source.url)
+        if family is None:
+            kept.append(source)
+            continue
+        key = (family, story_key(source, family))
+        previous = seen.get(key)
+        if previous is None:
+            seen[key] = source
+            kept.append(source)
+            continue
+        # Keep one copy per story, preferring the canonical host over country mirrors.
+        if _host(source.url) == family and _host(previous.url) != family:
+            kept[kept.index(previous)] = source
+            seen[key] = source
+        else:
+            dropped += 1
+    return kept, dropped
+
+
+def source_hygiene(sources, *, reference=None, max_age_hours=None):
+    """Clean duplicate and non-article results without imposing editorial relevance."""
+    reference = reference or datetime.now(timezone.utc)
+    counts = {}
+    kept = []
+    for source in sources:
+        reason = _junk_reason(source)
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+        else:
+            kept.append(source)
+    kept, mirror_dropped = _mirror_dedupe(kept)
+    if mirror_dropped:
+        counts["mirror_duplicates"] = mirror_dropped
+    # Keep dated background research available; the analyst decides its relevance.
+    # Exclude future publications rather than presenting them as known news.
+    result = [item for item in kept if not item.published_at or item.published_at <= reference]
+    if len(result) != len(kept):
+        counts["future_publications"] = len(kept) - len(result)
+    return result, counts

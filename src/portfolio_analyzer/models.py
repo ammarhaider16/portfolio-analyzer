@@ -20,6 +20,9 @@ class Position(Contract):
     exchange: str | None = Field(default=None, max_length=40)
     sector: str | None = None
     previous_close: Decimal | None = Field(default=None, ge=0)
+    price_as_of: datetime | None = None
+    price_session: date | None = None
+    price_source: str | None = None
 
     @field_validator("symbol")
     @classmethod
@@ -84,10 +87,10 @@ class AnalysisRequest(Contract):
     investment_profile: dict[str, Any] | None = None
     benchmark: str = Field(default="SPY", max_length=40)
     report_length: Literal["brief", "detailed"] = "brief"
-    max_searches: int = Field(default=30, ge=0, le=30)
-    max_model_calls: int = Field(default=8, ge=1, le=64)
-    max_tool_calls: int = Field(default=40, ge=0, le=200)
-    max_seconds: int = Field(default=120, ge=1, le=600)
+    max_searches: int = Field(default=100, ge=0, le=500)
+    max_model_calls: int = Field(default=64, ge=1, le=256)
+    max_tool_calls: int = Field(default=200, ge=0, le=1000)
+    max_seconds: int = Field(default=600, ge=1, le=1800)
     max_data_age_hours: int = Field(default=72, ge=1, le=8760)
     position_review_threshold_pct: float = Field(default=25, gt=0, le=100)
     sector_review_threshold_pct: float = Field(default=40, gt=0, le=100)
@@ -107,8 +110,7 @@ class AnalysisRequest(Contract):
 
 
 class Evidence(Contract):
-    # content_type values: "search_excerpt" (discovery only), "retrieved_page", "official_feed",
-    # and "news_feed" (a dated headline plus link; headline-grade evidence, not article text).
+    # Transport metadata for source preparation and trace inspection.
     id: str
     url: str
     title: str
@@ -119,32 +121,21 @@ class Evidence(Contract):
     content_type: str = "search_excerpt"
 
 
-class Finding(Contract):
-    title: str
-    detail: str
-    evidence_ids: list[str] = Field(default_factory=list)
-    kind: str = "observation"
-    affected_symbols: list[str] = Field(default_factory=list, max_length=30)
-    event_date: date | None = None
-    portfolio_relevance: str | None = Field(default=None, max_length=1000)
-    uncertainty: str | None = Field(default=None, max_length=1000)
-
-
-class BriefingSummary(Contract):
-    text: str = Field(min_length=1, max_length=1600)
-    evidence_ids: list[str] = Field(default_factory=list, max_length=30)
+class ReportSection(Contract):
+    heading: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=30000)
 
 
 class AnalysisResult(Contract):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     run_id: str = Field(default_factory=lambda: str(uuid4()))
     status: Literal["success", "partial", "failed"] = "success"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     snapshot_as_of: datetime
     metrics: dict[str, Any] = Field(default_factory=dict)
     coverage: dict[str, Any] = Field(default_factory=dict)
-    findings: list[Finding] = Field(default_factory=list)
-    executive_summary: BriefingSummary | None = None
+    executive_summary: str = ""
+    sections: list[ReportSection] = Field(default_factory=list)
     research_activity: list[dict[str, Any]] = Field(default_factory=list)
     research_budget: dict[str, Any] = Field(default_factory=dict)
     sources: list[Evidence] = Field(default_factory=list)
@@ -154,6 +145,6 @@ class AnalysisResult(Contract):
 
 
 class ResearchNarrative(Contract):
-    executive_summary: BriefingSummary | None = None
-    findings: list[Finding] = Field(default_factory=list, max_length=30)
+    executive_summary: str = Field(default="", max_length=20000)
+    sections: list[ReportSection] = Field(default_factory=list)
     suggestions: list[str] = Field(default_factory=list, max_length=10)
