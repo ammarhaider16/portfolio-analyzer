@@ -48,14 +48,16 @@ def _data(value):
     return value.model_dump(mode="json") if hasattr(value, "model_dump") else value
 
 
-def human_date(value, timezone="America/New_York"):
+def human_date(value, timezone="America/New_York", full=False):
     raw = str(value or "")
     try:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
             parsed = date.fromisoformat(raw)
         else:
             parsed = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(ZoneInfo(timezone))
-        return f"{parsed:%b} {parsed.day}, {parsed.year}"
+        return (
+            f"{parsed:%B} {parsed.day}, {parsed.year}" if full else f"{parsed:%b} {parsed.day}, {parsed.year}"
+        )
     except (ValueError, TypeError):
         return "Date unavailable"
 
@@ -72,20 +74,22 @@ def _clean(text):
 
 
 def _prose(text):
-    parts = []
-    for paragraph in re.split(r"\n\s*\n", _clean(text)):
-        lines = paragraph.splitlines()
-        if lines and all(re.match(r"^\s*[-*] ", line) for line in lines):
-            parts.append(
-                "<ul>"
-                + "".join("<li>" + escape(re.sub(r"^\s*[-*] ", "", line)) + "</li>" for line in lines)
-                + "</ul>"
-            )
-        else:
-            safe = escape(paragraph).replace("\n", "<br>")
-            safe = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe)
-            parts.append("<p>" + safe + "</p>")
-    return "".join(parts)
+    from markdown_it import MarkdownIt
+
+    # Model content remains text. Render standard formatting consistently in
+    # paragraphs, lists and tables; raw HTML is escaped, images are disabled.
+    renderer = MarkdownIt("commonmark", {"html": False}).enable("table").disable("image")
+    return (
+        renderer.render(_clean(text))
+        .replace("<table>", '<div class="table-scroll"><table>')
+        .replace("</table>", "</table></div>")
+    )
+
+
+def _plain(text):
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(_prose(text), "html.parser").get_text(" ", strip=True)
 
 
 def render_report(
@@ -93,8 +97,11 @@ def render_report(
 ):
     data = _data(result)
     metrics = data.get("metrics") or {}
-    lines = ["Betafolio briefing"]
-    body = "" if embed else "<h1>Betafolio briefing</h1>"
+    title = "Betafolio briefing — " + human_date(
+        data.get("created_at") or data.get("snapshot_as_of"), timezone, full=True
+    )
+    lines = [title]
+    body = "<h1>" + escape(title) + "</h1>"
     if any(str(warning).startswith("DEMONSTRATION PORTFOLIO") for warning in data.get("warnings", [])):
         body += '<p class="note">Demonstration portfolio — illustrative holdings and prices.</p>'
         lines.append("Demonstration portfolio — illustrative holdings and prices.")
@@ -109,17 +116,17 @@ def render_report(
     else:
         summary = briefing_summary(data)
         body += "<h2>Executive summary</h2>" + _prose(summary)
-        lines.extend(["Executive summary", _clean(summary)])
+        lines.extend(["Executive summary", _plain(summary)])
         for item in data.get("sections") or []:
             section = _data(item)
             heading, content = _clean(section["heading"]), _clean(section["content"])
             body += "<section><h2>" + escape(heading) + "</h2>" + _prose(content) + "</section>"
-            lines.extend([heading, content])
+            lines.extend([heading, _plain(content)])
         if data.get("suggestions"):
             body += "<h2>Optional adjustments</h2>" + _prose(
                 "\n".join("- " + value for value in data["suggestions"])
             )
-            lines.extend(data["suggestions"])
+            lines.extend(_plain(value) for value in data["suggestions"])
         positions = metrics.get("position_details") or []
         if positions:
             label = "Positions — " + human_date(metrics.get("price_session"), timezone)
@@ -167,14 +174,25 @@ def render_report(
             body += '<p class="note">' + escape(data["error"]) + "</p>"
             lines.append(data["error"])
     style = (
-        "body{font:16px/1.65 system-ui,sans-serif;color:#182629;background:#f4f6f3;margin:0;padding:16px}"
-        "main{max-width:760px;margin:auto;background:white;padding:clamp(16px,4vw,36px)}"
-        "h1{font-size:1.8rem}h2{font-size:1.15rem;margin:1.6em 0 .6em}p{margin:.5em 0 1em}"
-        "li{margin:.45em 0}table{border-collapse:collapse;width:100%}th,td{padding:.65em;border-bottom:1px solid #dbe2df}"
-        "th{text-align:left}td{text-align:right;font-variant-numeric:tabular-nums}.table-scroll{overflow:auto}.note{color:#536366;font-size:.9rem}"
+        ":root{color-scheme:light}*{box-sizing:border-box}"
+        'body{font:16px/1.7 "Segoe UI",Arial,sans-serif;color:#243b32;background:#f5f4ef;margin:0;padding:20px}'
+        "main{max-width:800px;margin:auto;background:#fffefb;padding:clamp(20px,5vw,52px);border-top:4px solid #295642}"
+        "h1{font:400 clamp(28px,4vw,38px)/1.15 Georgia,serif;letter-spacing:-.03em;margin:0 0 28px}"
+        "h2{font:400 23px/1.3 Georgia,serif;margin:1.7em 0 .65em;color:#173e2c}"
+        "h3,h4,h5,h6{font-size:17px;line-height:1.4;margin:1.3em 0 .5em}"
+        "p{margin:.6em 0 1em}strong{font-weight:650;color:#173e2c}em{font-style:italic}"
+        "li{margin:.5em 0}ul,ol{padding-left:1.3em}li p{margin:.35em 0}"
+        "blockquote{border-left:3px solid #bdcbbc;margin:1em 0;padding:.1em 1.1em;color:#53655a}"
+        "table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:.7em;border-bottom:1px solid #dfe5dc;overflow-wrap:anywhere}"
+        "th{text-align:left;color:#49614f;font-weight:600}td{text-align:right;font-variant-numeric:tabular-nums}"
+        "thead{background:#f2f4ed}.table-scroll{overflow:auto}.note{color:#637365;font-size:14px}"
+        "pre{white-space:pre-wrap;overflow-wrap:anywhere}code{font-size:.9em}section{overflow-wrap:anywhere}"
+        "@media(max-width:480px){body{padding:8px}main{padding:20px 16px}h2{font-size:21px}th,td{padding:.6em .4em}}"
     )
     html = (
-        '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Betafolio briefing</title><style>'
+        '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'
+        + escape(title)
+        + '</title><style>'
         + style
         + "</style></head><body><main>"
         + body

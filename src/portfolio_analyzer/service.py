@@ -25,17 +25,15 @@ from .storage import Store
 # Per-provider model key slots. Names must match SecretStore's identifier rule
 # ([a-zA-Z][a-zA-Z0-9_]*) so they map cleanly to PORTFOLIO_SECRET_<NAME>.
 MODEL_PROVIDER_SLOTS = {
-    "colgate": "model_api_key_colgate",
     "openai": "model_api_key_openai",
     "anthropic": "model_api_key_anthropic",
     "custom": "model_api_key_custom",
 }
 # Documented deployment aliases accepted for each provider.
 MODEL_PROVIDER_ALIASES = {
-    "colgate": ("LITELLM_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
-    "custom": (),
+    "custom": ("LITELLM_API_KEY",),
 }
 SECRET_ALIASES = {
     "tavily_api_key": ("TAVILY_API_KEY",),
@@ -189,14 +187,14 @@ def secret_status(settings, store, server=False):
     return secrets
 
 
-def create_model(settings, secret_store, api_key=None, model_name=None):
+def create_model(settings, secret_store, api_key=None):
     key = api_key
     if key is None:
         key, _source, _used = resolve_model_key(settings, secret_store)
     if not key:
         raise ValueError("Add a model API key or configure its environment variable")
     cfg = settings.model
-    selected_model = model_name if model_name is not None else cfg.model
+    selected_model = cfg.model
     base = cfg.base_url
     if cfg.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -234,12 +232,9 @@ def build_research(settings, secret_store, tavily_key=None):
 def build_dependencies(settings, secret_store, model_key=None, tavily_key=None):
     research = build_research(settings, secret_store, tavily_key=tavily_key)
     model = create_model(settings, secret_store, api_key=model_key) if settings.model_enabled else None
-    write_model = (create_model(settings, secret_store, api_key=model_key, model_name=settings.model.write_model)
-                   if model is not None and settings.model.write_model else None)
     return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.auto_prices_enabled or settings.market_data_enabled else None,
                               history_enabled=settings.market_data_enabled,
-                              instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model,
-                              write_model=write_model)
+                              instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model)
 
 
 # --- Model readiness probe (FR-15, contract §8) -----------------------------
@@ -326,9 +321,7 @@ async def probe_model_readiness(settings, secret_store, model=None, api_key=None
     if model is None:
         model = create_model(settings, secret_store, api_key=api_key)
     tool_calling, tool_reason, history = await _probe_tool_calling(model)
-    writer = (create_model(settings, secret_store, api_key=api_key, model_name=settings.model.write_model)
-              if settings is not None and settings.model.write_model else model)
-    structured_output, structured_reason = await _probe_structured_output(writer, history)
+    structured_output, structured_reason = await _probe_structured_output(model, history)
     return {"ok": readiness_ok(tool_calling, structured_output),
             "tool_calling": tool_calling, "structured_output": structured_output,
             "detail": readiness_detail(tool_calling, structured_output, tool_reason, structured_reason)}
@@ -543,7 +536,7 @@ class ApplicationService:
                 else:
                     snapshot = self.store.snapshot()
                     if snapshot is None:
-                        raise ValueError("Save holdings manually, import a CSV or screenshot, or select the demonstration portfolio")
+                        raise ValueError("Save holdings manually, import a CSV or Excel file, or select the demonstration portfolio")
                 request = self.request_for(snapshot, **overrides)
             else:
                 request = self.request_for(**request.model_dump(exclude={"snapshot"}), snapshot=request.snapshot)

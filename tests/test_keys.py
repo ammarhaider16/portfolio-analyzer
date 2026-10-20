@@ -53,12 +53,12 @@ def test_status_secrets_and_storage_shape(tmp_path):
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
         status = client.get('/api/status').json()
         secrets = status['secrets']
-        for name in ('model_api_key', 'model_api_key_colgate', 'model_api_key_openai', 'model_api_key_anthropic',
+        for name in ('model_api_key', 'model_api_key_openai', 'model_api_key_anthropic',
                      'model_api_key_custom', 'tavily_api_key', 'smtp_password'):
             assert set(secrets[name]) == {'present', 'source', 'saved_at', 'provider', 'editable', 'managed_by', 'env'}
         assert secrets['model_api_key_openai']['provider'] == 'openai'
         assert secrets['tavily_api_key']['provider'] is None
-        assert secrets['model_api_key']['provider'] == 'colgate'
+        assert secrets['model_api_key']['provider'] == 'custom'
         assert set(status['secret_storage']) >= {'available', 'backend', 'reason'}
         assert status['secret_storage']['available'] is True
         assert status['secrets_present']['model_api_key'] is False
@@ -104,7 +104,7 @@ def test_delete_query_convention_and_saved_key_slot(tmp_path):
         assert post(client, token, '/api/secrets/model_api_key', {'value': 'openai-secret'}).status_code == 200
         secrets = client.get('/api/status').json()['secrets']
         assert secrets['model_api_key_openai']['present'] is True
-        assert secrets['model_api_key_colgate']['present'] is False
+        assert secrets['model_api_key_custom']['present'] is False
         response = client.request('DELETE', '/api/secrets?name=model_api_key', headers={'x-csrf-token': token})
         assert response.status_code == 200, response.text
         assert client.get('/api/status').json()['secrets']['model_api_key_openai']['present'] is False

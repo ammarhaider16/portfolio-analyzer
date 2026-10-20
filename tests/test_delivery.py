@@ -68,3 +68,11 @@ def test_old_price_cannot_be_rendered_as_a_current_day_move():
     )
     _, text = render_report(value)
     assert "day change Unavailable" in text and "+5.26%" not in text
+
+
+def test_report_renders_emphasis_in_lists_and_tables_without_leaking_markers():
+    value = report()
+    value.sections = [ReportSection(heading='Position outlook', content='- **Apple:** watch demand.\n- **Cash:** provides flexibility.\n\n| Holding | Outlook |\n| --- | --- |\n| **AAPL** | Stable |')]
+    html, text = render_report(value)
+    assert '<strong>Apple:</strong>' in html and '<strong>AAPL</strong>' in html
+    assert '<table>' in html and '**' not in html + text

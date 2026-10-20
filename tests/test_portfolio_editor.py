@@ -39,7 +39,7 @@ def run_js(harness):
 DOM_HARNESS = r'''
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 class Element {
-  constructor(){this.children=[];this.dataset={};this.handlers={};this.value='';this.content='csrf';this._text='';this.className='';this.classList={add(){},remove(){},toggle(){}};}
+  constructor(){this.classList={add(){}};this.children=[];this.dataset={};this.handlers={};this.value='';this.content='csrf';this._text='';this.className='';this.classList={add(){},remove(){},toggle(){}};}
   append(...items){for(const item of items){item.parent=this;this.children.push(item);}}
   replaceChildren(){this.children=[];}
   setAttribute(){}
@@ -131,7 +131,7 @@ def test_editor_javascript_preserves_draft_and_validates_amounts():
     harness = r'''
 const fs=require('fs'), vm=require('vm'), assert=require('assert/strict');
 class Element {
-  constructor(){this.children=[];this.dataset={};this.handlers={};this.value='';this.content='csrf';this._text='';}
+  constructor(){this.classList={add(){}};this.children=[];this.dataset={};this.handlers={};this.value='';this.content='csrf';this._text='';}
   append(...items){for(const item of items){item.parent=this;this.children.push(item);}}
   replaceChildren(){this.children=[];}
   setAttribute(){}

@@ -8,13 +8,13 @@ services:
       PORTFOLIO_PUBLIC_URL: ${PORTFOLIO_PUBLIC_URL:?Set the HTTPS origin of your reverse proxy}
       PORTFOLIO_SECRET_OWNER_PASSWORD_FILE: /run/secrets/owner_password
       PORTFOLIO_SECRET_API_TOKEN_FILE: /run/secrets/api_token
-      PORTFOLIO_SECRET_MODEL_API_KEY_COLGATE_FILE: /run/secrets/model_api_key_colgate
+      PORTFOLIO_SECRET_MODEL_API_KEY_CUSTOM_FILE: /run/secrets/model_api_key_custom
       PORTFOLIO_SECRET_TAVILY_API_KEY_FILE: /run/secrets/tavily_api_key
       PORTFOLIO_SECRET_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
     secrets:
       - owner_password
       - api_token
-      - model_api_key_colgate
+      - model_api_key_custom
       - tavily_api_key
       - smtp_password
     volumes:
@@ -29,8 +29,8 @@ secrets:
     file: ./deployment-secrets/owner_password
   api_token:
     file: ./deployment-secrets/api_token
-  model_api_key_colgate:
-    file: ./deployment-secrets/model_api_key_colgate
+  model_api_key_custom:
+    file: ./deployment-secrets/model_api_key_custom
   tavily_api_key:
     file: ./deployment-secrets/tavily_api_key
   smtp_password:

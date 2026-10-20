@@ -1,6 +1,6 @@
 # Betafolio
 
-A personal portfolio dashboard with read-only research. Maintain holdings and cash manually, review CSV or screenshot imports, and run analyses on demand or on an optional schedule. There is no brokerage login, synchronization, or trading integration.
+A personal portfolio dashboard with read-only research. Maintain holdings and cash manually, review CSV or Excel imports, and run analyses on demand or on an optional schedule. There is no brokerage login, synchronization, or trading integration.
 
 ## Start locally
 
@@ -19,11 +19,9 @@ Open **http://127.0.0.1:8000**. The demonstration portfolio runs offline without
 
 Use **Fill missing details** on a draft to look up exact-ticker instrument names, types, sectors, and exchanges. It proposes changes for review and never fills share counts, replaces values you entered, or saves the portfolio automatically. The button supports up to 30 holdings at a time and requires network access to the market-data provider. It can also attach an offline daily-close quote for a holding that has none yet.
 
-Under **Imports & models**, choose either:
+Under **Import & research**, upload a file:
 
-- **CSV:** download a template in **Import & research**, preview a file, review/edit its positions and cash in the dashboard, then save. See [examples/holdings.csv](examples/holdings.csv). Supply a `ticker` (or `symbol`) and shares; a `price` column is optional and acts only as an offline fallback until automatic quotes replace it. `quantity` is optional in the file, but you must enter it in the review screen before saving because share count cannot be inferred from price. The draft names missing share counts and focuses the first one. Older `symbol,quantity` files remain accepted. Instrument type, issuer name, sector, and previous close are optional; research fills available metadata without inventing missing values. CASH and cash-type rows become the cash balance. With only `ticker,price`, a CASH row treats price as the cash amount. Quoted currency amounts such as `"$1,250.50"` are supported.
-
-- **Screenshot:** upload PNG, JPEG, or WebP up to 5 MB. Explicitly authorize sending the image to your configured model. A vision-capable model is required; the Colgate text-model preset might not support images. Extraction creates an unsaved draft. Unreadable quantities and cash remain blank and must be filled in before saving. Review every value: image extraction can make mistakes. Crop out account numbers and unrelated personal details. Original image bytes are not saved by this application.
+- **CSV or Excel:** drag a `.csv`, `.xlsx` or `.xls` file into the import area, or choose a file. Include ticker and price columns; shares are optional at import and must be supplied before saving. Excel reads the first visible worksheet. Files are limited to 5 MB and 1,000 holdings. Imports create editable drafts; review shares and cash before saving.
 
 Cash-only portfolios are supported. Duplicate holding rows must be combined before saving. The current portfolio is always the **latest saved** draft, not a partially edited import. Saving an edit replaces the current portfolio. Previous reports keep their original results.
 
@@ -33,7 +31,7 @@ Scheduled runs use the most recently saved quantities and cash at the start of t
 
 ## Configure research
 
-1. Configure and test a model in **Imports & models**. Colgate LiteLLM defaults to `openai/gpt-oss-120b` at `https://litellm.colgate.edu`. OpenAI, Anthropic, and custom OpenAI-compatible endpoints are supported.
+1. Configure and test a model in **Import & research**. OpenAI, Anthropic and any custom OpenAI-compatible endpoint are supported. Enter the endpoint, model identifier and API key for your provider.
 
 2. Keyless search, Federal Reserve updates, and keyless ticker news feeds (Google News/Nasdaq) are enabled by default for saved portfolios. SEC per-company filings (8-K/10-Q/10-K) are optional and start off without an identifying contact. Add a contact such as `Your name contact@example.com` beside the SEC checkbox to enable them; you can turn them off afterward. For more dependable news discovery, choose Tavily and add a key; you can also disable external research. Provider quotas still apply.
 
@@ -45,15 +43,15 @@ Scheduled runs use the most recently saved quantities and cash at the start of t
 
 The analyst chooses its own research approach, queries, report headings and emphasis. Three tools support it: news search with prepared readable content, article reading, and market-data lookup. The briefing includes an executive summary, daily position outlook, relevant news and important considerations. Brief and detailed preferences guide the amount of detail.
 
-Internal backstops default to ten minutes, 100 searches, 64 model calls and 200 tool calls. They are service configuration, not dashboard counters. The optional run trace shows tool activity and outcomes without private model reasoning.
+Internal backstops default to ten minutes, 100 searches, 64 model calls and 200 tool calls. They are service configuration, not dashboard counters. The Activity view lets you select a run and inspect its agent trace, including tool queries and outcomes, without private model reasoning. Overview shows a compact status while research runs.
 
 **Test saved search** checks each configured source separately and shows passed, empty, skipped, failed, or disabled outcomes. An empty response means the request worked but found no matching updates. Federal Reserve, Google News, and Nasdaq have separate outcomes, so a blocked feed cannot hide another feed that works. SEC requests with a missing or invalid identifying contact are skipped and named in run coverage. Changing research settings invalidates the saved source checks.
 
-Briefings group related headlines into stories and order holdings by known position value. Dated events appear before other coverage; publisher domains, source tiers, and headline/full/discovery labels explain the evidence available. Expand related reports or additional news to see more coverage. Publisher labels from feeds are declared metadata, not proof that an aggregator link was resolved. Plain-text briefings omit opaque aggregator URLs and direct you to the dashboard.
+The analyst chooses its report structure. The renderer typesets paragraphs, emphasis, lists and tables while escaping raw HTML. Report headings use an editorial serif, with clear sans-serif body text and tabular numbers. Source grades and forced story templates are not part of the report.
 
-Dates use the timezone selected in Schedule & email, including when scheduling is off. Detailed reports include a holding data table; brief reports include available price changes versus the prior close. Data notes keep the two most actionable limitations visible and expand the remainder. Percentage-only email keeps amounts and narrative out of the message.
+Dates use the timezone selected in Schedule & email, including when scheduling is off. A positions table accompanies the briefing. Percentage-only email keeps amounts and narrative out of the message.
 
-Model API access needs a key with access to the selected tool-capable model. No model is enabled by default. An optional write model can produce the final report after the research model has investigated. News preparation supplies publisher, publication date and readable content; the analyst decides what matters and explains material uncertainty in ordinary language.
+Model API access needs a key with access to the selected tool-capable model. No model is enabled by default. News preparation supplies publisher, publication date and readable content; the analyst decides what matters and explains material uncertainty in ordinary language.
 
 Model readiness (the setup test behind `POST /api/model/readiness`) sends two one-line probe requests and no portfolio data: one asks the model to call a trivial tool, one asks for a tiny JSON object. Each check reports `ok`, `weak`, or `fail`. A `weak` tool check means the analyst may gather little evidence and reports stay thin; a `weak` JSON check means briefing writes spend extra calls fixing formatting and the written analysis is more likely to be lost. For research runs, tool-calling and structured-output reliability matter more than raw model size: prefer models advertised with tool/function calling and JSON output. `fail` on either check points at the endpoint, API key, or model name first.
 
@@ -116,7 +114,7 @@ An external trading parent receives research, evidence, coverage, and optional i
 
 Configuration and reports live in the platform user-data directory; override with `PORTFOLIO_DATA_DIR` or `--data-dir`. Retention defaults to 90 days. Financial data and reports are stored locally in SQLite; protect the directory and backups with OS permissions and disk encryption.
 
-API keys use a supported OS credential store with no plaintext fallback. Model keys are stored per provider (`PORTFOLIO_SECRET_MODEL_API_KEY_COLGATE`, `..._OPENAI`, `..._ANTHROPIC`, `..._CUSTOM`) so switching provider never silently reuses another provider's key. Other credentials use `PORTFOLIO_SECRET_<NAME>` for `TAVILY_API_KEY`, `SMTP_PASSWORD`, `OWNER_PASSWORD`, and `API_TOKEN`.
+API keys use a supported OS credential store with no plaintext fallback. Model keys are stored per provider (`PORTFOLIO_SECRET_MODEL_API_KEY_OPENAI`, `..._ANTHROPIC`, `..._CUSTOM`) so switching provider never silently reuses another provider's key. Other credentials use `PORTFOLIO_SECRET_<NAME>` for `TAVILY_API_KEY`, `SMTP_PASSWORD`, `OWNER_PASSWORD`, and `API_TOKEN`.
 
 Every consumer resolves secrets with one precedence rule, highest first: a `PORTFOLIO_SECRET_<NAME>` environment variable, then an absolute `PORTFOLIO_SECRET_<NAME>_FILE` mounted file, then the key saved from the dashboard, then a documented convenience alias (`LITELLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`). Canonical `PORTFOLIO_SECRET_*` values are authoritative and read-only; convenience aliases are only a fallback, so a key saved in the dashboard overrides an ambient alias (for example a stale `LITELLM_API_KEY` left in your shell) — the model card reports which alias is supplying a key and lets you replace it.
 
@@ -124,7 +122,7 @@ The dashboard shows each saved key, when it was saved, and which provider it bel
 
 Nonsecret overrides use `PORTFOLIO_SETTING_<FIELD>`; use JSON for nested objects, booleans, and numbers. They appear read-only in the UI. Per-run requests cannot raise application budgets or weaken security controls.
 
-External models receive bounded portfolio/profile context and evidence; the account identifier is omitted. Screenshot extraction sends sanitized pixels to the selected provider only after the upload action. Search providers receive ticker/focus queries. Do not put secrets in questions. The app does not enable external tracing. HTML includes no remote images or scripts.
+External models receive portfolio/profile context and research content; the account identifier is omitted. Imported files are parsed locally. Search providers receive ticker/focus queries. Do not put secrets in questions. The app does not enable external tracing. HTML includes no remote images or scripts.
 
 The primary local target is Windows; Linux/macOS credential storage requires a supported OS keyring. Manual portfolios and the offline demo do not need a keyring. No brokerage integration or brokerage credentials are required.
 
@@ -132,11 +130,11 @@ The primary local target is Windows; Linux/macOS credential storage requires a s
 
 The Docker image uses frozen uv dependencies, a nonroot user, and persistent `/data`. Compose binds only to loopback and requires an HTTPS reverse proxy. Do not expose port 8000 directly.
 
-Create a private `deployment-secrets` directory with files named `owner_password`, `api_token`, `model_api_key_colgate`, `tavily_api_key`, and `smtp_password`. The owner password must have at least 16 characters; use a long random API token. Optional provider files can be empty. The Compose example mounts a Colgate model key; for another provider, use its `PORTFOLIO_SECRET_MODEL_API_KEY_<PROVIDER>_FILE` variable and matching secret file. Keep permissions restrictive and never commit them.
+Create a private `deployment-secrets` directory with files named `owner_password`, `api_token`, `model_api_key_custom`, `tavily_api_key`, and `smtp_password`. The owner password must have at least 16 characters; use a long random API token. Optional provider files can be empty. The Compose example mounts a custom endpoint model key; for another provider, use its `PORTFOLIO_SECRET_MODEL_API_KEY_<PROVIDER>_FILE` variable and matching secret file. Keep permissions restrictive and never commit them.
 
 Set `PORTFOLIO_PUBLIC_URL` to your exact HTTPS origin, then run `docker compose up --build -d`. Sign in and configure providers; edit mounted credential files outside the dashboard. For non-Docker hosting, set `PORTFOLIO_SERVER_MODE=1`, the HTTPS origin, and owner secret, then run `uv run portfolio-analyzer serve --server --host 0.0.0.0` behind a protected reverse proxy.
 
-Browser mutations require owner sessions and CSRF protection. Research clients use `Authorization: Bearer <API_TOKEN>` over HTTPS. Research tokens can request/read/cancel analyses; they cannot modify portfolios/settings, upload screenshots, or send email.
+Browser mutations require owner sessions and CSRF protection. Research clients use `Authorization: Bearer <API_TOKEN>` over HTTPS. Research tokens can request/read/cancel analyses; they cannot modify portfolios/settings, import portfolio files, or send email.
 
 ## Verification
 
@@ -147,6 +145,6 @@ uv run ruff check src tests examples
 uv run python examples/subagent.py --langchain
 ```
 
-Tests use fixtures/mocked external responses. `diagnostics --live` and connection-test buttons explicitly consume configured provider access. Screenshot model capability, provider entitlements, and real inbox delivery require your credentials. An optional browser test uses Node.js and installed Chrome: start a dashboard with a test data directory, then run `node scripts/browser-smoke.mjs`; set `CHROME_PATH` if necessary. Screenshots go under ignored `.tools`.
+Tests use fixtures/mocked external responses. `diagnostics --live` and connection-test buttons explicitly consume configured provider access. Provider entitlements and real inbox delivery require your credentials. An optional browser test uses Node.js and installed Chrome: start a dashboard with a test data directory, then run `node scripts/browser-smoke.mjs`; set `CHROME_PATH` if necessary. Screenshots go under ignored `.tools`.
 
-Model request timeout is configurable under advanced model settings (90 seconds by default). The overall research budget still applies. Research readiness checks the tool-result conversation and the actual briefing schema; it does not guarantee that every source will answer. The optional write model writes the final briefing while the research model selects and uses research tools.
+Model request timeout is configurable under advanced model settings (90 seconds by default). The overall research budget still applies. Research readiness checks the tool-result conversation and the actual briefing schema; it does not guarantee that every source will answer.

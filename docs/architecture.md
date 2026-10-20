@@ -1,6 +1,6 @@
 # Research architecture
 
-Betafolio separates a read-only research engine from portfolio editing, scheduling, persistence and optional email delivery. The latest saved manual, CSV or screenshot portfolio is the input to scheduled runs. Imports remain editable drafts until saved; quantities and cash are never guessed.
+Betafolio separates a read-only research engine from portfolio editing, scheduling, persistence and optional email delivery. The latest saved manual, CSV or Excel portfolio is the input to scheduled runs. Imports remain editable drafts until saved; quantities and cash are never guessed.
 
 ## Analyst workflow
 
@@ -29,14 +29,20 @@ print(result.model_dump_json(indent=2))
 
 An empty dependency set provides offline calculations. `build_dependencies(settings, secrets)` enables configured providers. `create_research_tool(dependencies)` exposes the same engine as a read-only LangChain subagent; a trading parent owns any execution decisions. See `examples/subagent.py` and the generated JSON schemas. Result schema version 2.0 replaces findings and source-bound summary objects with text and model-chosen sections; development builds do not keep that obsolete report contract.
 
-`POST /api/runs` accepts a supplied `analysis` or the latest `stored` portfolio. `GET /api/runs/{id}` exposes progress and results. Research API tokens cannot mutate portfolios, import images, configure the app or send email. The dashboard owner can import/edit/save and explicitly request delivery. Email and scheduling are optional.
+`POST /api/runs` accepts a supplied `analysis` or the latest `stored` portfolio. `GET /api/runs/{id}` exposes progress and results. Research API tokens cannot mutate portfolios, import files, configure the app or send email. The dashboard owner can import/edit/save and explicitly request delivery. Email and scheduling are optional.
 
 ## Operational controls
 
-Defaults are 600 seconds, 100 discovery searches, 64 model calls and 200 tool calls. Owner/service ceilings remain enforceable for hosted use, but limits are absent from the normal dashboard and model context. A finalization reserve allows writing from collected information. The optional writer receives the research conversation. Readiness exercises a real tool-result conversation and the same report schema used by runs. No model-family-specific request options are forced.
+Defaults are 600 seconds, 100 discovery searches, 64 model calls and 200 tool calls. Owner/service ceilings remain enforceable for hosted use, but limits are absent from the normal dashboard and model context. A finalization reserve allows writing from collected information. Readiness exercises a real tool-result conversation and the same report schema used by runs. No model-family-specific request options are forced.
 
 Cancellation propagates; interrupted work never implies successful completion. Provider errors are sanitized and retained in the trace. Network operations use bounded shared workers, DNS/IP validation, redirect revalidation, request timeouts and source-specific access rules. Private-network addresses are blocked. SEC access requires an identifying contact. SMTP uses validated TLS and a single verified owner recipient. Secrets stay in OS credentials or deployment-managed files, never browser values or run results.
 
 ## Validation
 
 See `tests/README.md` for test scope. Core checks cover financial arithmetic, quote dates, the actual SDK tool wire contract, safe report rendering, editable imports, authorization, source transport, secret isolation and scheduled delivery semantics. UI browser smoke checks exercise portfolio drafts, saved secrets, the visible report and responsive layout. Tests do not enforce analyst wording, heading choices, source grades or a fixed number of research calls.
+
+## Portfolio file import
+
+`POST /api/import/file` accepts `filename`, base64 `content_base64` and a timezone-aware `as_of`. CSV, XLSX and XLS up to 5 MB are parsed locally into the same unsaved draft. Excel uses the first visible worksheet, at most 1,000 holdings and 50 columns. Workbooks are read without executing macros or formulas; cached cell values are used. Expanded XLSX archives are limited to 20 MB and XML parsing uses defusedxml. The former screenshot extraction endpoint and vision dependency have been removed.
+
+The Activity view selects a stored run and displays its observed agent trace. The portfolio view shows compact progress while research runs. The report renderer supports Markdown emphasis/lists/tables with raw HTML disabled; the model still controls report structure.

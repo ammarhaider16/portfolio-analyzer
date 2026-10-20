@@ -109,7 +109,7 @@ def test_logout_revokes_copied_cookie_and_persisted_key(tmp_path):
         assert restarted.get('/api/status').status_code == 401
 
 
-@pytest.mark.parametrize('path,limit', [('/api/import', 1_000_000), ('/api/import/image', 7_100_000)])
+@pytest.mark.parametrize('path,limit', [('/api/import', 1_000_000), ('/api/import/file', 7_100_000)])
 async def test_chunked_actual_body_limit_without_content_length(tmp_path, path, limit):
     app = create_app(tmp_path, server=False)
     transport = httpx.ASGITransport(app=app)

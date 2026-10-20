@@ -15,10 +15,9 @@ from .source_status import valid_sec_contact
 
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    provider: Literal["colgate", "openai", "anthropic", "custom"] = "colgate"
-    model: str = "openai/gpt-oss-120b"
-    write_model: str | None = None
-    base_url: str = "https://litellm.colgate.edu"
+    provider: Literal["openai", "anthropic", "custom"] = "custom"
+    model: str = ""
+    base_url: str = "https://api.openai.com/v1"
     temperature: float = Field(default=0, ge=0, le=2)
     max_tokens: int = Field(default=3000, ge=256, le=16000)
     request_timeout_seconds: int = Field(default=90, ge=10, le=300)
@@ -27,24 +26,10 @@ class ModelConfig(BaseModel):
     @classmethod
     def provider_endpoint(cls, data):
         if isinstance(data, dict) and "base_url" not in data:
-            endpoints = {"colgate": "https://litellm.colgate.edu", "openai": "https://api.openai.com/v1",
-                         "anthropic": "https://api.anthropic.com", "custom": "http://127.0.0.1:4000/v1"}
-            data = {**data, "base_url": endpoints.get(data.get("provider", "colgate"), "https://litellm.colgate.edu")}
+            endpoints = {"openai": "https://api.openai.com/v1",
+                         "anthropic": "https://api.anthropic.com", "custom": "https://api.openai.com/v1"}
+            data = {**data, "base_url": endpoints.get(data.get("provider", "custom"), "https://api.openai.com/v1")}
         return data
-
-    @field_validator("write_model", mode="before")
-    @classmethod
-    def validate_write_model(cls, value):
-        if value is None:
-            return value
-        if not isinstance(value, str):
-            raise ValueError("Write model must be a model identifier")
-        value = value.strip()
-        if not value:
-            raise ValueError("Write model must not be empty")
-        if len(value) > 100:
-            raise ValueError("Write model must be at most 100 characters")
-        return value
 
     @field_validator("base_url")
     @classmethod

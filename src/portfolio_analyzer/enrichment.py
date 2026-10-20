@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from .models import PortfolioSnapshot, Position
 from .providers import YFinanceMarketDataProvider
-from .screenshot_import import DraftPosition
+from .imports import DraftPosition
 
 
 class PortfolioEnrichmentAgent:

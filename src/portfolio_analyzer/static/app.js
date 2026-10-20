@@ -83,8 +83,8 @@ function setForm(id, data) {
     if (element.type === 'checkbox') element.checked = Boolean(value); else element.value = value ?? '';
   }
 }
-const VIEW_ROUTES={desk:'portfolio',portfolio:'portfolio',connections:'connections',preferences:'preferences',automation:'automation'};
-const HASH_VIEWS={desk:'desk',portfolio:'desk',connections:'connections',preferences:'preferences',automation:'automation'};
+const VIEW_ROUTES={desk:'portfolio',portfolio:'portfolio',connections:'connections',preferences:'preferences',automation:'automation',activity:'activity'};
+const HASH_VIEWS={desk:'desk',portfolio:'desk',connections:'connections',preferences:'preferences',automation:'automation',activity:'activity'};
 function viewFromHash(hash) { const key=String(hash||'').replace(/^#/,'').split('?')[0].toLowerCase(); return HASH_VIEWS[key]||null; }
 let currentView='desk';
 function view(name, updateHash=true) {
@@ -123,7 +123,7 @@ async function openReport(id, scroll=false) {
 function renderReportSummary(row) {
   currentReportRow=row;updateReportHeading();
   $('#report-summary').replaceChildren();
-  $('#report-coverage').textContent='';
+  $('#report-coverage').textContent='';$('#report-coverage').hidden=true;
   $('#report-date').textContent=row.result?.metrics?.price_session?`Prices for ${new Date(row.result.metrics.price_session+'T12:00:00').toLocaleDateString('en-US',{year:'numeric',month:'short',day:'numeric'})}`:'';
 }
 function friendlyEvent(event){
@@ -133,22 +133,30 @@ function friendlyEvent(event){
 function rawEventLine(event){
   const seconds=event.elapsed_seconds??(event.elapsed_ms===undefined?null:event.elapsed_ms/1000);
   return [event.tool,event.asset||event.symbol,event.query,event.source,event.status,event.reason,
-    seconds===null?null:`${Number(seconds).toFixed(1)}s`].filter(Boolean).join(' · ');
+    seconds===null?null:`${Number(seconds).toFixed(1)}s`].filter(Boolean).join(' | ');
 }
+let selectedTrace=null;
 function renderActivityPhases(events){
   const root=$('#activity-phases');if(!root)return;root.replaceChildren();
-  for(const event of events.slice(-12)){const line=document.createElement('p');line.textContent=friendlyEvent(event);root.append(line);}
+  for(const event of events.slice(-8)){const line=document.createElement('div');line.className='trace-event';const title=document.createElement('strong');title.textContent=friendlyEvent(event);line.append(title);if(event.query){const query=document.createElement('span');query.textContent=event.query;line.append(query);}root.append(line);}
 }
 function renderResearchActivity(row) {
-  const card=$('#research-activity');if(!card)return;
-  const events=row?.research_activity||row?.result?.research_activity||[];
-  card.hidden=!row;if(!row)return;
-  $('#activity-status').textContent=`Run ${row.id?.slice(0,8)||''} · ${row.status||'complete'}`;
-  renderActivityPhases(events);
-  const empty=!events.length;
-  const list=$('#activity-entries');list.replaceChildren();
-  if(empty){const entry=document.createElement('li');entry.textContent=['queued','running'].includes(row.status)?'Waiting for the first research tool result…':'No tool activity was recorded for this report.';list.append(entry);}
+  const card=$('#research-activity');if(!card)return;const events=row?.research_activity||row?.result?.research_activity||[];
+  card.hidden=!row;$('#trace-empty').hidden=Boolean(row);if(!row)return;
+  const signature=JSON.stringify([row.id,row.status,events]);if(card.dataset.signature===signature)return;card.dataset.signature=signature;
+  $('#activity-status').textContent=`${dateLabel(row.created_at)} | ${row.status||'complete'}`;
+  $('#trace-report').hidden=!['success','partial'].includes(row.status);$('#trace-report').onclick=()=>{view('desk');openReport(row.id,true);};
+  renderActivityPhases(events);const list=$('#activity-entries');list.replaceChildren();
+  if(!events.length){const entry=document.createElement('li');entry.textContent=['queued','running'].includes(row.status)?'Waiting for the first research result…':'No tool activity was recorded for this report.';list.append(entry);}
   for(const event of events){const entry=document.createElement('li');entry.textContent=rawEventLine(event);list.append(entry);}
+}
+async function refreshActivity(rows){
+  const select=$('#trace-run'),signature=JSON.stringify(rows.map(row=>[row.id,row.status]));
+  if(select.dataset.signature!==signature){select.dataset.signature=signature;select.replaceChildren();for(const row of rows){const option=document.createElement('option');option.value=row.id;option.textContent=`${dateLabel(row.created_at)} | ${row.status}`;select.append(option);}if(!rows.length){const option=document.createElement('option');option.value='';option.textContent='No research runs yet';select.append(option);}}
+  if(selectedTrace&&!rows.some(row=>row.id===selectedTrace))selectedTrace=null;
+  const running=rows.find(row=>['queued','running'].includes(row.status));const row=rows.find(row=>row.id===selectedTrace)||running||rows[0];
+  if(row){select.value=row.id;try{renderResearchActivity(await api(`/api/runs/${encodeURIComponent(row.id)}`));}catch{$('#activity-status').textContent='Trace temporarily unavailable. It will refresh automatically.';}}else renderResearchActivity(null);
+  $('#run-progress').hidden=!running;if(running)$('#run-progress-text').textContent=running.status==='queued'?'Research queued':'Research in progress';
 }
 
 function goToIssue(actionName){if(actionName==='portfolio'){view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});return;}view('connections');$('#research-setup').open=true;$('#research-setup').scrollIntoView({behavior:'smooth'});}
@@ -180,7 +188,7 @@ function updateDraftProgress() {
   const missing=[];const names=[];
   for(const row of $('#holdings-rows').children){const fields=[...row.querySelectorAll('input,select')];const quantity=fields.find(field=>field.dataset.field==='quantity');if(quantity&&!quantity.value.trim()){missing.push(quantity);names.push(fields.find(field=>field.dataset.field==='symbol')?.value||'unnamed holding');}}
   const cashMissing=!$('#portfolio-cash').value.trim();
-  progress.textContent=`${activeImportSource} draft · positions dated ${dateLabel($('#portfolio-date').value)}. ${missing.length} ${missing.length===1?'share count':'share counts'} needed${names.length?`: ${names.join(', ')}`:''}${cashMissing?'; cash balance needed':''}. Review then save.`;
+  progress.textContent=`${activeImportSource} draft | positions dated ${dateLabel($('#portfolio-date').value)}. ${missing.length} ${missing.length===1?'share count':'share counts'} needed${names.length?`: ${names.join(', ')}`:''}${cashMissing?'; cash balance needed':''}. Review then save.`;
 }
 function markPortfolioDirty() { portfolioDirty=true; editStatus('Unsaved changes. Save holdings and cash before starting a briefing.'); updateDraftProgress(); }
 function focusFirstMissing(){let input=null;for(const row of $('#holdings-rows').children){input=[...row.querySelectorAll('input,select')].find(field=>field.dataset.field==='quantity'&&!field.value.trim());if(input)break;}(input||(!$('#portfolio-cash').value.trim()?$('#portfolio-cash'):null))?.focus();}
@@ -212,7 +220,7 @@ function addHolding(position={}) {
   const symbolCell=row.firstElementChild;const details=document.createElement('details');details.className='instrument-details';const summary=document.createElement('summary');summary.textContent='Instrument details';details.append(summary);
   const typeLabel=document.createElement('label');typeLabel.textContent='Type';const type=document.createElement('select');type.dataset.field='asset_type';type.setAttribute('aria-label','Instrument type');for(const [value,text] of [['unknown','Unknown'],['stock','Stock'],['etf','ETF'],['fund','Fund'],['mutual_fund','Mutual fund'],['bond','Bond'],['cash','Cash'],['other','Other']]){const option=document.createElement('option');option.value=value;option.textContent=text;type.append(option);}type.value=position.asset_type || 'unknown';if(!type.value){const option=document.createElement('option');option.value=position.asset_type;option.textContent=position.asset_type;type.append(option);type.value=position.asset_type;}type.addEventListener('change',markPortfolioDirty);typeLabel.append(type);details.append(typeLabel);
   for(const [name,label] of [['instrument_name','Instrument name'],['exchange','Exchange'],['sector','Sector']]){const fieldLabel=document.createElement('label');fieldLabel.textContent=label;const input=document.createElement('input');input.dataset.field=name;input.value=position[name]??'';input.addEventListener('input',markPortfolioDirty);fieldLabel.append(input);details.append(fieldLabel);}symbolCell.append(details);
-  const cell=document.createElement('td');cell.dataset.label='Action'; const remove=button('Remove',()=>{row.remove();markPortfolioDirty();});remove.type='button';remove.setAttribute('aria-label',`Remove ${position.symbol || 'holding'}`);cell.append(remove);row.append(cell);$('#holdings-rows').append(row);
+  const cell=document.createElement('td');cell.dataset.label=''; const remove=button('',()=>{row.remove();markPortfolioDirty();});remove.type='button';remove.classList.add('icon-button','delete-holding');remove.setAttribute('aria-label',`Delete ${position.symbol || 'holding'}`);remove.title='Delete holding';const icon=document.createElement('img');icon.src='/static/icons/trash.svg';icon.alt='';icon.className='ui-icon';remove.append(icon);cell.append(remove);row.append(cell);$('#holdings-rows').append(row);
 }
 function priceValue(value){ if(value===null||value===undefined||value==='')return null; return String(value).trim().replace(/^\$\s*/,'').replaceAll(',','') || null; }
 function formatPrice(value){ const numeric=Number(priceValue(value)); return value===null||value===undefined||value===''||!Number.isFinite(numeric)?'—':money.format(numeric); }
@@ -242,7 +250,7 @@ function applyQuotes(prices){
 }
 function loadPortfolio(snapshot, draft=false) {
   editorSnapshot=snapshot ? structuredClone(snapshot) : {as_of:new Date().toISOString(),positions:[],cash:'0',source:'manual',account_id:'manual',unsupported:[]};
-  activeImportSource=draft?(snapshot?.source==='image'?'Screenshot':'CSV'):null;
+  activeImportSource=draft?'Imported portfolio':null;
   pricesBySymbol=new Map();
   for(const position of editorSnapshot.positions||[]) pricesBySymbol.set(position.symbol,{...position,price:priceValue(position.price),previous_close:priceValue(position.previous_close)});
   $('#holdings-rows').replaceChildren();for(const position of editorSnapshot.positions) addHolding(position);
@@ -285,10 +293,10 @@ function renderAllocation(snapshot) {
   const exclusion=omittedNames.length?`${omittedNames.join(', ')} excluded`:'All holdings priced';
   const knownFigure=snapshot?displayFigure(total):{text:'—',exact:''};
   const cashFigure=snapshot?displayFigure(cash):{text:'—',exact:''};
-  const known=$('#known-value');known.textContent=knownFigure.text;known.title=knownFigure.exact;known.setAttribute('aria-label',snapshot?`Holdings we could price and cash: ${knownFigure.exact}`:'No portfolio saved');
+  const known=$('#known-value');known.textContent=knownFigure.text;known.title=knownFigure.exact;known.setAttribute('aria-label',snapshot?`Portfolio value including cash: ${knownFigure.exact}`:'No portfolio saved');
   const cashEl=$('#cash-value');cashEl.textContent=cashFigure.text;cashEl.title=cashFigure.exact;cashEl.setAttribute('aria-label',snapshot?`Cash balance: ${cashFigure.exact}`:'No cash balance saved');
-  $('#cash-share').textContent=snapshot&&total>0?`${pct.format(cash/total)} of what we could price${omittedNames.length?`; ${exclusion}`:''}`:'Share of what we could price';
-  $('#value-coverage').textContent=snapshot?`${valued.length} of ${positions.length} holdings we could price${omittedNames.length?`; ${exclusion}`:''}`:'Prices update automatically';
+  $('#cash-share').textContent=snapshot&&total>0?`${pct.format(cash/total)} of portfolio value${omittedNames.length?`; ${exclusion}`:''}`:'Share of portfolio value';
+  $('#value-coverage').textContent=snapshot?`${valued.length} of ${positions.length} holdings with prices${omittedNames.length?`; ${exclusion}`:''}`:'Prices update automatically';
   const chartTotal=$('#chart-total');const chartFigure=snapshot?{text:compactFigure(total),exact:exactMoney(total)}:{text:'—',exact:''};
   chartTotal.textContent=chartFigure.text;chartTotal.title=chartFigure.exact;
   const chart=$('#allocation-chart');
@@ -296,10 +304,10 @@ function renderAllocation(snapshot) {
   const parts=[...valued];if(cash>0)parts.push({name:'Cash',value:cash});parts.sort((a,b)=>b.value-a.value);
   const tableParts=parts.slice(0,7);if(parts.length>7)tableParts.push({name:`${parts.length-7} other positions`,value:parts.slice(7).reduce((sum,part)=>sum+part.value,0)});
   const colors=['#184c44','#319982','#d69a57','#6b84a1','#b37664','#8e8e68','#a7bdad','#d8d1bd'];let offset=0;const stops=[];
-  tableParts.forEach((part,index)=>{const angle=part.value/total*360;stops.push(`${colors[index]} ${offset}deg ${offset+angle}deg`);offset+=angle;const tr=document.createElement('tr');const name=document.createElement('th');name.scope='row';name.textContent=part.name;name.title=part.name;name.style.setProperty('--slice-color',colors[index]);const value=document.createElement('td');const partFigure=displayFigure(part.value);value.textContent=partFigure.text;value.title=partFigure.exact;const share=document.createElement('td');share.textContent=pct.format(part.value/total);share.title=`${pct.format(part.value/total)} of what we could price`;tr.append(name,value,share);rows.append(tr);});
+  tableParts.forEach((part,index)=>{const angle=part.value/total*360;stops.push(`${colors[index]} ${offset}deg ${offset+angle}deg`);offset+=angle;const tr=document.createElement('tr');const name=document.createElement('th');name.scope='row';name.textContent=part.name;name.title=part.name;name.style.setProperty('--slice-color',colors[index]);const value=document.createElement('td');const partFigure=displayFigure(part.value);value.textContent=partFigure.text;value.title=partFigure.exact;const share=document.createElement('td');share.textContent=pct.format(part.value/total);share.title=`${pct.format(part.value/total)} of portfolio value`;tr.append(name,value,share);rows.append(tr);});
   chart.style.background=`conic-gradient(${stops.join(',')})`;
-  chart.setAttribute('aria-label',`Holdings we could price and cash ${exactMoney(total)}. ${tableParts.map(part=>`${part.name} ${pct.format(part.value/total)} of what we could price`).join('; ')}. ${omittedNames.length?exclusion+'.':''}`);
-  $('#allocation-caption').textContent=`${valued.length} of ${positions.length} holdings we could price`;
+  chart.setAttribute('aria-label',`Portfolio value including cash ${exactMoney(total)}. ${tableParts.map(part=>`${part.name} ${pct.format(part.value/total)} of portfolio value`).join('; ')}. ${omittedNames.length?exclusion+'.':''}`);
+  $('#allocation-caption').textContent=`${valued.length} of ${positions.length} holdings with prices`;
   $('#allocation-note').textContent=omittedNames.length?`${exclusion} from known value and allocation. ${priceNote()}`:priceNote();
 }
 
@@ -311,10 +319,10 @@ function updateResearchReadiness() {
   const sourceTests=tests.search?.sources;
   const testedWorkingSources=Object.values(sourceTests||{}).filter(item=>['passed','empty'].includes(item.status)).length;
   $('#cap-measures').textContent=hasPortfolio?'Ready from saved holdings and cash':'Add holdings or cash';
-  $('#cap-events').textContent=!searchConfigured?'Unavailable · set up search':testedWorkingSources?`${testedWorkingSources} sources available${tests.search.status==='partial'?' · some sources need attention':''}`:tests.search?.status==='failed'||tests.search?.status==='partial'?'No tested source available · review source checks':'Search configured · test it';
-  $('#cap-model').textContent=!modelConfigured?'Unavailable · add a model':tests.model?.status==='passed'?`Model tested ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?'Model test failed · retry':'Model configured · test it';
+  $('#cap-events').textContent=!searchConfigured?'Unavailable | set up search':testedWorkingSources?`${testedWorkingSources} sources available${tests.search.status==='partial'?' | some sources need attention':''}`:tests.search?.status==='failed'||tests.search?.status==='partial'?'No tested source available | review source checks':'Search configured | test it';
+  $('#cap-model').textContent=!modelConfigured?'Unavailable | add a model':tests.model?.status==='passed'?`Model tested ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?'Model test failed | retry':'Model configured | test it';
   $('#model-test-state').textContent=tests.model?.status==='passed'?`Last test passed ${dateLabel(tests.model.tested_at)}`:tests.model?.status==='failed'?`Last test failed ${dateLabel(tests.model.tested_at)}`:'Connection not tested';
-  $('#search-test-state').textContent=sourceTests?`Source checks ${dateLabel(tests.search.tested_at)} · see individual outcomes`:'Sources not tested';
+  $('#search-test-state').textContent=sourceTests?`Source checks ${dateLabel(tests.search.tested_at)} | see individual outcomes`:'Sources not tested';
   const chips=$('#source-states');chips.replaceChildren();
   const enabled=settings.search_provider!=='disabled';
   const sourceSettings={search:enabled,fed:enabled&&settings.primary_feeds_enabled,sec_filings:enabled&&settings.sec_company_filings_enabled,google_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('google_news'),nasdaq:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('nasdaq'),bing_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('bing_news')};
@@ -359,7 +367,7 @@ function setMailProvider(preserve=false) {
   else help.innerHTML='Enter the SMTP details from your mail provider. Outlook.com requires OAuth2, which this password-based setup does not support. <a href="https://support.microsoft.com/en-us/outlook/pop-imap-and-smtp-settings-for-outlook-com" target="_blank" rel="noopener noreferrer">Outlook.com requirements</a>.';
 }
 
-const NARRATIVE_BADGES={available:{text:'Briefing ready',cls:'state-written'},not_written:{text:'Briefing incomplete · retry',cls:'state-retry',retry:true},unavailable:{text:'Analyst unavailable',cls:'state-retry'},not_applicable:{text:'No analysis needed',cls:'state-written'}};
+const NARRATIVE_BADGES={available:{text:'Briefing ready',cls:'state-written'},not_written:{text:'Briefing incomplete | retry',cls:'state-retry',retry:true},unavailable:{text:'Analyst unavailable',cls:'state-retry'},not_applicable:{text:'No analysis needed',cls:'state-written'}};
 function outcomeBadge(row){
   const status=row&&row.status;
   if(status==='queued')return {text:'Queued',cls:'state-queued'};
@@ -368,7 +376,7 @@ function outcomeBadge(row){
   const known=NARRATIVE_BADGES[row&&row.narrative_state];
   if(known)return {text:known.text,cls:known.cls,retry:Boolean(known.retry)};
   return (row&&row.analysis_written===false)
-    ? {text:'Briefing incomplete · retry',cls:'state-retry',retry:true}
+    ? {text:'Briefing incomplete | retry',cls:'state-retry',retry:true}
     : {text:'Briefing ready',cls:'state-written'};
 }
 function runActive(){return Boolean(state&&Array.isArray(state.history)&&state.history.some(row=>['queued','running'].includes(row.status)));}
@@ -388,7 +396,7 @@ function historyItem(row) {
   const item=document.createElement('div'); item.className='history-row';
   const info=document.createElement('div'), title=document.createElement('strong'), detail=document.createElement('small');
   title.textContent=dateLabel(row.created_at); detail.textContent=row.error || (row.schedule_key ? `Scheduled session ${row.schedule_key}` : 'On-demand research');
-  if(row.delivery) detail.textContent+=` · Email: ${row.delivery}`;
+  if(row.delivery) detail.textContent+=` | Email: ${row.delivery}`;
   info.append(title,detail);
   const actions=document.createElement('div'); actions.className='history-actions';
   const badge=document.createElement('span'); const outcome=outcomeBadge(row); badge.className=`badge ${row.status} ${outcome.cls}`; badge.textContent=outcome.text; actions.append(badge);
@@ -396,7 +404,7 @@ function historyItem(row) {
   if(outcome.retry) actions.append(button('Run again',()=>{focusRunButton();}));
   if(['queued','running'].includes(row.status)) actions.append(button('Cancel', async()=>{await api(`/api/runs/${row.id}/cancel`,{}); await refresh();}));
   else {
-    if(row.status!=='failed') actions.append(button('Read report →',()=>openReport(row.id,true)));
+    if(row.status!=='failed') actions.append(button('Read report',()=>{view('desk');openReport(row.id,true);}));
     actions.append(button('Delete', async()=>{
       if(!window.confirm('Delete this report? This cannot be undone.')) return;
       await api(`/api/runs/${row.id}`,undefined,'DELETE');
@@ -404,6 +412,7 @@ function historyItem(row) {
       await refresh(); notice('Report deleted.');
     }));
   }
+  actions.append(button('Agent trace',async()=>{selectedTrace=row.id;view('activity');await refreshActivity(state.history);}));
   item.append(info,actions); return item;
 }
 function historySignature(row){return JSON.stringify([row.status,row.summary,row.error,row.delivery,row.created_at,row.schedule_key,row.narrative_state,row.analysis_written,row.section_titles]);}
@@ -438,7 +447,7 @@ async function refresh(populate=false) {
   if(snapshot){const serverPrices={};for(const position of snapshot.positions||[]){if(position.price!==null&&position.price!==undefined)serverPrices[position.symbol]={price:position.price,previous_close:position.previous_close};}applyQuotes(serverPrices);}
   updatePricesLabel();
   renderAllocation(snapshot);
-  $('#snapshot-time').textContent=snapshot ? `Saved ${dateLabel(snapshot.as_of)} · ${snapshot.positions.length} holdings` : 'Add holdings manually, import a CSV, or try a screenshot.';
+  $('#snapshot-time').textContent=snapshot ? `Saved ${dateLabel(snapshot.as_of)} | ${snapshot.positions.length} holdings` : 'Add holdings manually or import CSV or Excel.';
   $('#source-label').textContent=snapshot ? 'LAST SAVED PORTFOLIO' : 'NO PORTFOLIO SAVED';
   $('#top-status').textContent=snapshot ? `Positions as of ${dateLabel(snapshot.as_of)}` : 'Add positions to begin';
   $('#next-run').textContent=state.next_run ? `Next scheduled run: ${dateLabel(state.next_run)}` : 'Research available on demand';
@@ -458,9 +467,9 @@ async function refresh(populate=false) {
     if (s.investment_profile) {const targets={...s.investment_profile.allocation_targets};for(const name of ['stocks','bonds','cash']){const input=$('#profile-form').elements.namedItem(`target_${name}`);input.value=targets[name]??'';delete targets[name];}setForm('#profile-form',{...s.investment_profile,allocation_targets:Object.keys(targets).length?JSON.stringify(targets,null,2):'', restrictions:(s.investment_profile.restrictions||[]).join('\n')});}
     if(snapshot) $('#run-source').value='stored';
     const mail=s.smtp;const mailProvider=mail?.host==='smtp.gmail.com'?'gmail':mail?.host==='smtp.mail.me.com'?'icloud':mail?'custom':'gmail';$('#mail-provider').value=mailProvider;setMailProvider(true);
-    const now=new Date(); now.setMinutes(now.getMinutes()-now.getTimezoneOffset()); $('#import-form').elements.as_of.value=now.toISOString().slice(0,16); $('#image-form').elements.as_of.value=now.toISOString().slice(0,16);
+    const now=new Date(); now.setMinutes(now.getMinutes()-now.getTimezoneOffset()); $('#import-form').elements.as_of.value=now.toISOString().slice(0,16);
     const managed=state.externally_managed;
-     const nested={model:['#model-form',['provider','model','write_model','base_url','temperature','max_tokens']],schedule:['#schedule-form',['enabled','delay_minutes','timezone']],smtp:['#email-form',['host','port','username','sender','recipient','tls_mode','plain_text_only','percent_only']]};
+     const nested={model:['#model-form',['provider','model','base_url','temperature','max_tokens']],schedule:['#schedule-form',['enabled','delay_minutes','timezone']],smtp:['#email-form',['host','port','username','sender','recipient','tls_mode','plain_text_only','percent_only']]};
     for(const key of managed) {
       if(nested[key]) {const [form,names]=nested[key];for(const name of names) $(form).elements.namedItem(name).disabled=true;}
       else {const selectorName=key==='model_enabled'?'enabled':key;const form=key==='model_enabled'?$('#model-form'):null;document.querySelectorAll(`[name="${selectorName}"]`).forEach(element=>{if(!form||form.contains(element))element.disabled=true;});}
@@ -472,10 +481,9 @@ async function refresh(populate=false) {
   renderSecretStorage();
   renderHistory(state.history);
   updateReportHeading();
-  const activityRun=state.history.find(row=>['queued','running'].includes(row.status))||state.history.find(row=>row.id===selectedReport)||latest;
-  if(activityRun){try{renderResearchActivity(await api(`/api/runs/${encodeURIComponent(activityRun.id)}`));}catch{$('#activity-status').textContent='Activity temporarily unavailable; retrying on the next refresh.';}}
+  await refreshActivity(state.history);
   if(latest && ['success','partial'].includes(latest.status) && latest.id!==lastAutoReport && !selectedReport) {openReport(latest.id); lastAutoReport=latest.id;}
-  if(pendingRunId){const pending=state.history.find(row=>row.id===pendingRunId);if(pending&&['success','partial','failed'].includes(pending.status)){pendingRunId=null;notice(pending.status==='failed'?'Research failed. Check the run in history.':'Research finished. Conclusions and coverage are shown above.',pending.status==='failed');if(pending.status!=='failed')await openReport(pending.id,true);}}
+  if(pendingRunId){const pending=state.history.find(row=>row.id===pendingRunId);if(pending&&['success','partial','failed'].includes(pending.status)){pendingRunId=null;notice(pending.status==='failed'?'Research failed. Check the run in history.':'Your briefing is ready.',pending.status==='failed');if(pending.status!=='failed')await openReport(pending.id,true);}}
 }
 async function refreshQuotes() {
   if(portfolioDirty || document.hidden || !state || !state.snapshot) return;
@@ -499,7 +507,7 @@ async function poll(populate=false){
   catch(error){if(!pollFailed){pollFailed=true;setPollStatus(`Live updates are paused. ${error.message}`);}}
 }
 async function save(body, quiet=false) {for(const key of state.externally_managed) delete body[key];if(!Object.keys(body).length)throw new Error('These settings are managed by your deployment environment.');await api('/api/settings',body); await refresh(); if(!quiet) notice('Settings saved.'); }
-const PROVIDER_LABELS={colgate:'Colgate LiteLLM',openai:'OpenAI',anthropic:'Anthropic',custom:'Custom'};
+const PROVIDER_LABELS={openai:'OpenAI',anthropic:'Anthropic',custom:'Custom OpenAI-compatible'};
 const SECRET_FIELDS=[
   {form:'#model-form',field:'key',key:'model_api_key',test:'model',title:'model'},
   {form:'#research-form',field:'key',key:'tavily_api_key',test:'search',title:'Tavily'},
@@ -565,6 +573,7 @@ if($('#login-form')) {
   window.addEventListener('resize',()=>{if(reportFrame&&!$('#report-card').hidden)sizeReportFrame();});
   window.addEventListener('hashchange',()=>{const target=viewFromHash(window.location.hash);if(target&&target!==currentView)view(target,false);});
   const initialView=viewFromHash(window.location.hash); if(initialView) view(initialView,false);
+  $('#trace-run').addEventListener('change',action(async event=>{selectedTrace=event.target.value;await refreshActivity(state.history);}));
   $('#refresh').addEventListener('click',action(()=>refresh()));
   $('#clear-history').addEventListener('click',action(async()=>{
     const finished=(state.history||[]).filter(row=>!['queued','running'].includes(row.status));
@@ -579,36 +588,31 @@ if($('#login-form')) {
     if(portfolioDirty) {view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});throw new Error('Save or discard your portfolio edits before starting a briefing.');}
     const data=values('#run-form'); data.include_suggestions=checked('#run-form','include_suggestions'); data.send_email=checked('#run-form','send_email');
     const run=await api('/api/runs',data);pendingRunId=run.run_id;runQuestions.set(run.run_id,String(data.question||''));selectedReport=null;$('#run-form').elements.include_suggestions.checked=false;
-    notice('Research started. Your report will appear here.'); await refresh();
+    notice('Research started. Follow the run in Activity; your briefing will appear here.'); await refresh();
   }));
+  const upload=$('#import-form').elements.file, dropzone=$('#upload-zone');
+  function selectedFile(){const file=upload.files[0];$('#upload-label').textContent=file?file.name:'Drop your portfolio here';dropzone.classList.toggle('has-file',Boolean(file));}
+  upload.addEventListener('change',selectedFile);
+  ['dragenter','dragover'].forEach(name=>dropzone.addEventListener(name,event=>{event.preventDefault();dropzone.classList.add('drag-over');}));
+  ['dragleave','drop'].forEach(name=>dropzone.addEventListener(name,event=>{event.preventDefault();dropzone.classList.remove('drag-over');}));
+  dropzone.addEventListener('drop',event=>{if(event.dataTransfer.files.length){const transfer=new DataTransfer();transfer.items.add(event.dataTransfer.files[0]);upload.files=transfer.files;selectedFile();}});
   $('#import-form').addEventListener('submit',action(async()=>{
-    const form=$('#import-form'); const file=form.elements.file.files[0]; if(!file || file.size>500000) throw new Error('Choose a CSV smaller than 500 KB.');
-    importDraft={csv:await file.text(),as_of:new Date(form.elements.as_of.value).toISOString(),confirm:false};
-    const preview=await api('/api/import',importDraft); $('#import-preview').hidden=false;
-    loadPortfolio(preview,true); const missing=preview.positions.filter(p=>p.quantity===null||p.quantity===undefined||p.quantity==='').length;$('#import-preview').textContent=`${preview.positions.length} holdings in the draft. ${missing} ${missing===1?'needs':'need'} shares before saving. Check the cash balance too.`; $('#confirm-import').hidden=false; view('desk'); $('#portfolio-editor').scrollIntoView({behavior:'smooth'});focusFirstMissing();
+    const form=$('#import-form'),file=form.elements.file.files[0];
+    if(!file||file.size>5*1024*1024||! /\.(csv|xlsx|xls)$/i.test(file.name))throw new Error('Choose a CSV or Excel file up to 5 MB.');
+    const content_base64=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Unable to read this file.'));reader.readAsDataURL(file);});
+    const preview=await api('/api/import/file',{filename:file.name,content_base64,as_of:new Date(form.elements.as_of.value).toISOString()});
+    loadPortfolio(preview,true);const missing=preview.positions.filter(p=>p.quantity===null||p.quantity===undefined||p.quantity==='').length;
+    $('#import-preview').hidden=false;$('#import-preview').textContent=`${preview.positions.length} holdings imported. ${missing?`${missing} need shares. `:''}Review prices and cash before saving.`;$('#confirm-import').hidden=false;
+    view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});focusFirstMissing();notice('Portfolio imported as a draft. Review your holdings and cash, then save.');
   }));
   $('#confirm-import').addEventListener('click',()=>{view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});focusFirstMissing();});
-  $('#image-form').addEventListener('submit',action(async()=>{
-    const form=$('#image-form'), file=form.elements.file.files[0];
-    if(!file || file.size>5*1024*1024 || !['image/png','image/jpeg','image/webp'].includes(file.type)) throw new Error('Choose a PNG, JPEG, or WebP screenshot no larger than 5 MB.');
-    if(!form.elements.consent.checked) throw new Error('Confirm that this image can be sent to your configured model.');
-    const control=$('#image-button'); control.disabled=true; notice('Extracting a draft. You will review and save it yourself.');
-    try {
-      const encoded=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Unable to read this image.'));reader.readAsDataURL(file);});
-      const draft=await api('/api/import/image',{image_base64:encoded,content_type:file.type,as_of:new Date(form.elements.as_of.value).toISOString()});
-      const {warnings:notes,...snapshot}=draft;
-      loadPortfolio(snapshot,true); form.elements.file.value=''; form.elements.consent.checked=false;
-      view('desk'); $('#portfolio-editor').scrollIntoView({behavior:'smooth'});focusFirstMissing();
-      notice((notes||[]).join('\n') || 'Review every extracted value, fill in missing quantities and cash, then save.');
-    } finally {control.disabled=false;}
-  }));
   $('#add-holding').addEventListener('click',()=>{addHolding();markPortfolioDirty();});
   $('#fill-details').addEventListener('click',action(async()=>{
     const rows=[...$('#holdings-rows').children];if(!rows.length)throw new Error('Add a ticker or import holdings first.');
     if(rows.length>30)throw new Error('Fill details supports up to 30 holdings at a time. Review a smaller draft.');
     const positions=rows.map(row=>{const item={};for(const input of row.querySelectorAll('input,select'))item[input.dataset.field]=input.value.trim();item.symbol=item.symbol.toUpperCase();item.quantity=item.quantity?amount(item.quantity,`${item.symbol} shares`):null;const known=pricesBySymbol.get(item.symbol)||{};item.price=priceValue(known.price);item.previous_close=priceValue(known.previous_close);for(const field of ['instrument_name','exchange','sector'])item[field]=item[field]||null;return item;});
-    const control=$('#fill-details');control.disabled=true;notice('Looking up missing ticker details and an offline daily-close quote. Your draft will remain unsaved.');
-    try{const result=await api('/api/portfolio/enrich',{positions});result.positions.forEach((position,index)=>{const row=rows[index];for(const [field,value] of Object.entries(position)){const input=[...row.querySelectorAll('input,select')].find(element=>element.dataset.field===field);if(input&&value!==null&&value!==undefined)input.value=value;}if(position.price!==null&&position.price!==undefined){pricesBySymbol.set(position.symbol,{price:position.price,previous_close:position.previous_close});const cell=row.querySelector('.holding-price');if(cell)cell.textContent=formatPrice(position.price);}});markPortfolioDirty();const names=result.changes.map(item=>`${item.symbol}: ${item.fields.join(', ')}${item.price_as_of?` (daily close ${item.price_as_of})`:''}${item.source?` via ${item.source}`:''}`);notice(names.length?`Added ${names.join('; ')}. Review and save your portfolio. Quantity is never inferred.`:'No verified missing details were available. Review ticker symbols or enter values manually.');}
+    const control=$('#fill-details');control.disabled=true;notice('Looking up missing instrument details and available prices.');
+    try{const result=await api('/api/portfolio/enrich',{positions});result.positions.forEach((position,index)=>{const row=rows[index];for(const [field,value] of Object.entries(position)){const input=[...row.querySelectorAll('input,select')].find(element=>element.dataset.field===field);if(input&&value!==null&&value!==undefined)input.value=value;}if(position.price!==null&&position.price!==undefined){pricesBySymbol.set(position.symbol,{price:position.price,previous_close:position.previous_close});const cell=row.querySelector('.holding-price');if(cell)cell.textContent=formatPrice(position.price);}});markPortfolioDirty();const names=result.changes.map(item=>`${item.symbol}: ${item.fields.join(', ')}${item.price_as_of?` (daily close ${item.price_as_of})`:''}${item.source?` via ${item.source}`:''}`);notice(names.length?`Added ${names.join('; ')}. Review and save your portfolio. Quantity is never inferred.`:'No additional details were available. Check ticker symbols or enter values manually.');}
     finally{control.disabled=false;}
   }));
   $('#portfolio-date').addEventListener('input',markPortfolioDirty);
@@ -620,11 +624,11 @@ if($('#login-form')) {
     await refresh();$('#run-source').value='stored';notice('Holdings and cash saved. Your portfolio is ready for a briefing.');
   }));
   window.addEventListener('beforeunload',event=>{if(portfolioDirty){event.preventDefault();event.returnValue='';}});
-  $('#model-provider').addEventListener('change',()=>{const presets={colgate:['openai/gpt-oss-120b','https://litellm.colgate.edu'],openai:['','https://api.openai.com/v1'],anthropic:['','https://api.anthropic.com'],custom:['','http://127.0.0.1:4000/v1']};const [model,base_url]=presets[$('#model-provider').value];setForm('#model-form',{model,base_url});});
+  $('#model-provider').addEventListener('change',()=>{const presets={openai:['','https://api.openai.com/v1'],anthropic:['','https://api.anthropic.com'],custom:['','https://api.openai.com/v1']};const [model,base_url]=presets[$('#model-provider').value];setForm('#model-form',{model,base_url});});
   $('#model-form').addEventListener('submit',action(async()=>{
     const data=values('#model-form'), key=(data.key||'').trim();
     // Validate/persist settings first; only then store the key, and only then clear the field.
-    await save({model:{provider:data.provider,model:data.model,write_model:(data.write_model||'').trim()||null,base_url:data.base_url,temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),request_timeout_seconds:Number(data.request_timeout_seconds)},model_enabled:checked('#model-form','enabled')},true);
+    await save({model:{provider:data.provider,model:data.model,base_url:data.base_url,temperature:Number(data.temperature),max_tokens:Number(data.max_tokens),request_timeout_seconds:Number(data.request_timeout_seconds)},model_enabled:checked('#model-form','enabled')},true);
     if(key){await api('/api/secrets/model_api_key',{value:key});const input=$('#model-form').elements.key;input.value='';input.dataset.editing='false';await refresh();}
     notice('Model settings saved.');
   }));

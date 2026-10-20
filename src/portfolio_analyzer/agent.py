@@ -38,12 +38,10 @@ async def generate_narrative(
     deadline=None,
     activity=None,
     budget=None,
-    write_model=None,
 ):
     from langchain.agents import create_agent
     from langchain.agents.middleware import wrap_model_call
     from langchain.agents.structured_output import ToolStrategy
-    from langchain_core.messages import ToolMessage
     from .research_runtime import ResearchRuntime, ResearchBudgetExceeded
     from .service import safe_error_reason
 
@@ -58,7 +56,7 @@ async def generate_narrative(
         activity_sink=activity_sink,
     )
     drafts = []
-    state = {"writing": False, "repairs": 0}
+    state = {"repairs": 0}
 
     def repair(error):
         state["repairs"] += 1
@@ -78,33 +76,13 @@ async def generate_narrative(
         if runtime.budget["model_calls"] >= request.max_model_calls:
             raise ResearchBudgetExceeded("Finish with the information already collected")
         runtime.budget["model_calls"] += 1
-        if state["writing"] or last:
-            call = call.override(model=write_model or model, tools=[])
+        if last:
+            call = call.override(tools=[])
         await runtime.emit("analyst", "started")
         response = await handler(call)
         if response.structured_response is not None:
             narrative = ResearchNarrative.model_validate(response.structured_response)
             drafts.append(narrative)
-            if write_model is not None and not state["writing"] and not last:
-                state["writing"] = True
-                response.structured_response = None
-                messages = list(response.result)
-                identifier = next(
-                    tool["id"]
-                    for message in messages
-                    for tool in (getattr(message, "tool_calls", None) or [])
-                    if tool["name"] == "ResearchNarrative"
-                )
-                notice = ToolMessage(
-                    content="Research is complete. Write the final report in your chosen structure.",
-                    name="ResearchNarrative",
-                    tool_call_id=identifier,
-                )
-                if messages and getattr(messages[-1], "name", None) == "ResearchNarrative":
-                    messages[-1] = notice
-                else:
-                    messages.append(notice)
-                response.result = messages
         return response
 
     agent = create_agent(

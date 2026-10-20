@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from portfolio_analyzer.engine import EngineDependencies, analyze_portfolio
 from portfolio_analyzer.enrichment import PortfolioEnrichmentAgent
 from portfolio_analyzer.models import AnalysisRequest, PortfolioSnapshot
-from portfolio_analyzer.screenshot_import import DraftPosition
+from portfolio_analyzer.imports import DraftPosition
 from portfolio_analyzer.web import create_app
 
 

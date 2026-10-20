@@ -11,7 +11,6 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
@@ -19,19 +18,18 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings, data_directory, externally_managed, save_settings
 from .delivery import render_report
-from .imports import parse_holdings_csv, validate_portfolio_snapshot
+from .imports import DraftPosition, parse_holdings_csv, parse_holdings_file, validate_portfolio_snapshot
 from .models import AnalysisRequest, AnalysisResult, PortfolioSnapshot
 from .scheduling import next_session_run
 from .secrets import SecretStorageError
 from .service import (MODEL_PROVIDER_ALIASES, MODEL_PROVIDER_SLOTS, SECRET_ALIASES, ApplicationService,
                       build_dependencies, create_model, probe_model_readiness, read_secret,
                       resolve_secret, safe_error_reason, secret_status)
-from .screenshot_import import DraftPosition
 
 MODEL_SECRET_SLOTS = set(MODEL_PROVIDER_SLOTS.values()) | {"model_api_key"}
 DEPLOYMENT_SECRETS = {"tavily_api_key", "smtp_password"}
@@ -81,19 +79,6 @@ class EnrichmentRequest(BaseModel):
     positions: list[DraftPosition] = Field(min_length=1, max_length=30)
 
 
-class ScreenshotSubmission(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    image_base64: str = Field(min_length=1, max_length=7_000_000)
-    content_type: Literal["image/png", "image/jpeg", "image/webp"]
-    as_of: datetime
-
-    @field_validator("as_of")
-    @classmethod
-    def timezone_required(cls, value):
-        if value.tzinfo is None:
-            raise ValueError("Snapshot date must include a timezone")
-        return value
-
 
 def create_app(directory: Path | None = None, server: bool | None = None):
     directory = directory or data_directory()
@@ -130,7 +115,6 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         hosts.append(parsed_url.hostname)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     login_attempts = {}
-    image_import_lock = asyncio.Lock()
     # A cookie minted by an unauthenticated local dashboard must never authorize
     # a server deployment, a different origin, or a changed owner credential.
     session_audience = hashlib.sha256((
@@ -217,7 +201,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                 return JSONResponse({"detail": "Owner sign-in required"}, status_code=401)
         # Application endpoints accept small JSON, not arbitrary uploads.
         try:
-            body_limit = 7_100_000 if path == "/api/import/image" else 1_000_000
+            body_limit = 7_100_000 if path == "/api/import/file" else 1_000_000
             if int(request.headers.get("content-length", "0")) > body_limit:
                 return JSONResponse({"detail": "Request is too large"}, status_code=413)
         except ValueError:
@@ -522,6 +506,22 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             service.store.save_snapshot(saved)
         return snapshot.model_dump(mode="json")
 
+    @app.post("/api/import/file")
+    async def import_file(request: Request):
+        body = await json_object(request)
+        filename = body.get("filename", "")
+        encoded = body.get("content_base64", "")
+        if not isinstance(filename, str) or len(filename) > 255 or not isinstance(encoded, str):
+            raise ValueError("Choose a CSV or Excel file up to 5 MB")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("The uploaded file could not be read. Choose it again.") from None
+        timestamp = datetime.fromisoformat(str(body.get("as_of", "")).replace("Z", "+00:00"))
+        # Workbooks are parsed in a worker; uploads always return an unsaved draft.
+        draft = await asyncio.to_thread(parse_holdings_file, content, filename, timestamp)
+        return draft.model_dump(mode="json")
+
     @app.get("/api/import/template")
     async def import_template():
         return PlainTextResponse("ticker,price,quantity\nAAPL,200,10\nCASH,1000,\n", media_type="text/csv",
@@ -540,26 +540,6 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         from .enrichment import PortfolioEnrichmentAgent
         async with asyncio.timeout(45):
             return await PortfolioEnrichmentAgent().enrich(request.positions)
-
-    @app.post("/api/import/image")
-    async def import_image(submission: ScreenshotSubmission):
-        if image_import_lock.locked():
-            raise HTTPException(409, "A screenshot is already being processed; wait for it to finish")
-        try:
-            image_bytes = base64.b64decode(submission.image_base64, validate=True)
-        except (ValueError, binascii.Error):
-            raise ValueError("Upload a valid PNG, JPEG, or WebP screenshot") from None
-        from .screenshot_import import extract_portfolio_image, ImageImportError
-        async with image_import_lock:
-            try:
-                model = create_model(service.settings, service.secrets)
-                draft = await extract_portfolio_image(image_bytes, submission.content_type, model)
-            except ImageImportError:
-                raise
-            except Exception:
-                raise ValueError("Screenshot import requires a configured vision-capable model and API key. Configure one in Imports & models, or enter holdings manually.") from None
-        # An extraction is only a draft. Saving requires a separate owner-confirmed request.
-        return {**draft, "as_of": submission.as_of.isoformat(), "account_id": "manual", "unsupported": []}
 
     @app.post("/api/runs", status_code=202)
     async def create_run(submission: RunSubmission, request: Request):

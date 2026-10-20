@@ -41,7 +41,6 @@ class EngineDependencies:
     instrument_resolver: Any = None
     research: Any = None
     model: Any = None
-    write_model: Any = None
     history_enabled: bool = False
     hard_search_limit: int = 500
     hard_seconds_limit: int = 1800
@@ -210,7 +209,6 @@ async def _analyze(request, dependencies, result, deadline):
             result.sources,
             research=dependencies.research,
             market_data=dependencies.market_data,
-            write_model=dependencies.write_model,
             activity=result.research_activity,
             budget=result.research_budget,
             activity_sink=dependencies.activity_sink,

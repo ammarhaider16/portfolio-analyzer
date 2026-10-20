@@ -210,8 +210,8 @@ def test_secrets_validation_and_presence_never_echo_values(tmp_path):
         assert status.json()['secrets_present']['model_api_key'] is True
         assert status.json()['secrets_editable']['model_api_key'] is True
         info = status.json()['secrets']['model_api_key']
-        assert info['present'] is True and info['source'] == 'keyring' and info['provider'] == 'colgate'
-        assert status.json()['secrets']['model_api_key_colgate']['present'] is True
+        assert info['present'] is True and info['source'] == 'keyring' and info['provider'] == 'custom'
+        assert status.json()['secrets']['model_api_key_custom']['present'] is True
         assert status.json()['secret_storage']['available'] in (True, False)
         assert secret not in status.text
         assert post(client, token, '/api/secrets/not_allowed', {'value': secret}).status_code == 404
@@ -263,7 +263,7 @@ def test_research_token_can_read_research_cancel_but_cannot_mutate_or_email(tmp_
         assert response.status_code == 202
         run_id = response.json()['run_id']
         assert client.get('/api/runs/' + run_id).status_code == 200
-        for path in ('/api/settings', '/api/portfolio', '/api/import', '/api/import/image',
+        for path in ('/api/settings', '/api/portfolio', '/api/import', '/api/import/file',
                      '/api/runs/' + run_id + '/send', '/api/email/verification', '/api/email/verify',
                      '/api/secrets/model_api_key'):
             assert client.post(path, json={}).status_code == 403, path
@@ -331,13 +331,13 @@ def test_model_key_delete_targets_the_active_provider_slot(tmp_path, isolated_cr
     # A key migrated to the legacy shared slot must be removable from the dashboard, not
     # redirected to an empty per-provider slot.
     values = isolated_credentials
-    values['model_api_key_colgate'] = 'dedicated-key-123'
+    values['model_api_key_custom'] = 'dedicated-key-123'
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
         token = csrf(client)
         assert client.get('/api/status').json()['secrets']['model_api_key']['present'] is True
         response = client.delete('/api/secrets/model_api_key', headers={'x-csrf-token': token})
         assert response.status_code == 200, response.text
-        assert 'model_api_key_colgate' not in values
+        assert 'model_api_key_custom' not in values
         assert client.get('/api/status').json()['secrets']['model_api_key']['present'] is False
 
 
