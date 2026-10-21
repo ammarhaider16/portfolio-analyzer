@@ -8,7 +8,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
-from zoneinfo import ZoneInfo
 
 from .config import load_settings
 from .delivery import send_report, send_verification
@@ -232,8 +231,8 @@ def build_research(settings, secret_store, tavily_key=None):
 def build_dependencies(settings, secret_store, model_key=None, tavily_key=None):
     research = build_research(settings, secret_store, tavily_key=tavily_key)
     model = create_model(settings, secret_store, api_key=model_key) if settings.model_enabled else None
-    return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider() if settings.auto_prices_enabled or settings.market_data_enabled else None,
-                              history_enabled=settings.market_data_enabled,
+    return EngineDependencies(research=research, market_data=YFinanceMarketDataProvider(),
+                              history_enabled=True,
                               instrument_resolver=YFinanceMarketDataProvider(refresh_existing=False), model=model)
 
 
@@ -318,13 +317,31 @@ async def _probe_structured_output(model, history):
 
 async def probe_model_readiness(settings, secret_store, model=None, api_key=None):
     """Probe a research tool/result round trip and the actual briefing schema, without portfolio data."""
-    if model is None:
-        model = create_model(settings, secret_store, api_key=api_key)
-    tool_calling, tool_reason, history = await _probe_tool_calling(model)
-    structured_output, structured_reason = await _probe_structured_output(model, history)
-    return {"ok": readiness_ok(tool_calling, structured_output),
-            "tool_calling": tool_calling, "structured_output": structured_output,
-            "detail": readiness_detail(tool_calling, structured_output, tool_reason, structured_reason)}
+    steps = [{'id':name,'label':label,'status':'skipped','message':'Not run'} for name,label in
+             [('connection','Connection'),('tools','Tool calling'),('briefing','Briefing output')]]
+    tool_calling, structured_output = 'fail', 'fail'
+    try:
+        async with asyncio.timeout(65):
+            if model is None:
+                model = create_model(settings, secret_store, api_key=api_key)
+            await model.ainvoke('Reply with the single word ready.')
+            steps[0].update(status='passed',message='The model connection works.')
+            tool_calling, reason, history = await _probe_tool_calling(model)
+            steps[1].update(status='passed' if tool_calling == 'ok' else 'failed',
+                            message='The model can use research tools.' if tool_calling == 'ok' else reason or 'This model did not make the requested tool call. Check tool support.')
+            if tool_calling == 'ok':
+                structured_output, reason = await _probe_structured_output(model, history)
+                steps[2].update(status='passed' if structured_output == 'ok' else 'failed',
+                                message='The model can produce a briefing.' if structured_output == 'ok' else reason or 'The model did not return a complete briefing.')
+    except Exception as error:
+        pending = next((step for step in steps if step['status']=='skipped'),steps[-1])
+        pending.update(status='failed',message=safe_error_reason(error,api_key))
+    ok = all(step['status']=='passed' for step in steps)
+    detail = 'Your model is ready for research.' if ok else next(step['message'] for step in steps if step['status']=='failed')
+    return {'ok':ok,'message':detail,'detail':detail,'steps':steps,
+            'tool_calling':tool_calling,'structured_output':structured_output,
+            'tested_at':datetime.now(timezone.utc).isoformat()}
+
 
 
 def run_outcome_state(result_json):
@@ -378,19 +395,8 @@ class QuoteService:
             self._cache = self.store.get(self.KEY, {}) or {}
         return self._cache
 
-    @staticmethod
-    def _market_open(now: datetime) -> bool:
-        local = now.astimezone(ZoneInfo("America/New_York"))
-        if local.weekday() >= 5:
-            return False
-        minutes = local.hour * 60 + local.minute
-        return 9 * 60 + 30 <= minutes < 16 * 60
-
     def ttl_seconds(self, now: datetime | None = None) -> int:
-        now = now or datetime.now(timezone.utc)
-        if self._market_open(now):
-            return self.market_hours_ttl
-        return max(1, int(self.settings_provider().price_refresh_minutes)) * 60
+        return self.settings_provider().price_refresh_seconds
 
     def as_of(self) -> str | None:
         stamps = [entry.get("quote_as_of") for entry in self.metadata().values() if entry.get("quote_as_of")]
@@ -412,9 +418,6 @@ class QuoteService:
 
     async def refresh(self, force: bool = False, now: datetime | None = None) -> dict:
         """Refresh stored prices when enabled and stale; never raises to callers."""
-        settings = self.settings_provider()
-        if not force and not settings.auto_prices_enabled:
-            return self.metadata()
         snapshot = self.store.snapshot()
         symbols = list(dict.fromkeys(position.symbol for position in snapshot.positions)) if snapshot else []
         if not symbols:
@@ -476,6 +479,9 @@ class ApplicationService:
         self.quotes = QuoteService(self.store, YFinanceMarketDataProvider(), lambda: self.settings)
         self.tasks = {}
         self.stopping = False
+        self.connection_lock = asyncio.Lock()
+        self.quote_wakeup = asyncio.Event()
+        self.force_quote_refresh = False
 
     @property
     def settings(self):
@@ -511,6 +517,10 @@ class ApplicationService:
 
     def submit(self, request=None, source="stored", send_email=False, schedule_key=None, overrides=None):
         settings = self.settings
+        if source != 'demo':
+            readiness = self.research_readiness()
+            if readiness['state'] != 'ready':
+                raise ValueError(' '.join(issue['message'] for issue in readiness['issues']))
         if send_email and (not settings.smtp or self.store.get("verified_recipient") != settings.smtp.recipient):
             raise ValueError("Configure email and verify its recipient before sending")
         run_id = str(uuid4())
@@ -640,10 +650,11 @@ class ApplicationService:
         if self.store.has_schedule(key):
             return
         try:
+            await self.ensure_research_ready()
             self.submit(source="stored", send_email=settings.scheduled_email, schedule_key=key,
                         overrides={"question": f"Explain the market session associated with the scheduled briefing at {eligible.isoformat()}. Separate later developments from session drivers.", "include_suggestions": False, "reporting_cutoff": eligible})
-        except ValueError:
-            pass
+        except ValueError as error:
+            self.store.set("scheduler_error",str(error))
 
     async def refresh_quotes(self, force: bool = False):
         """Best-effort quote refresh; never lets market-data failures reach callers."""
@@ -669,11 +680,43 @@ class ApplicationService:
                               "price_session":entry.get("trading_date"), "price_source":entry.get("source")}
         return {"prices": prices, "as_of": self.quotes.as_of(), "refresh_seconds": self.quotes.ttl_seconds()}
 
+    def request_price_refresh(self):
+        self.force_quote_refresh = True
+        self.quote_wakeup.set()
+
+    async def quote_loop(self):
+        while not self.stopping:
+            self.quote_wakeup.clear()
+            force, self.force_quote_refresh = self.force_quote_refresh, False
+            await self.refresh_quotes(force=force)
+            try:
+                async with asyncio.timeout(self.settings.price_refresh_seconds):
+                    await self.quote_wakeup.wait()
+            except TimeoutError:
+                pass
+
+    def research_readiness(self):
+        from .connections import readiness
+        return readiness(self)
+
+    def connection_tests(self):
+        from .connections import cached
+        return {kind: result for kind in ('model', 'search') if (result := cached(self, kind))}
+
+    async def test_connection(self, kind, value=None):
+        from .connections import check
+        async with self.connection_lock:
+            return await check(self,kind,value)
+
+    async def ensure_research_ready(self):
+        from .connections import ensure_ready
+        async with self.connection_lock:
+            await ensure_ready(self)
+
     async def scheduler_loop(self):
         while not self.stopping:
             try:
                 await self.scheduler_tick()
-                await self.refresh_quotes()
                 self.store.prune(self.settings.retention_days)
             except Exception:
                 self.store.set("scheduler_error", "Scheduled run could not start; check holdings, email verification, and connections.")
@@ -681,6 +724,7 @@ class ApplicationService:
 
     async def close(self):
         self.stopping = True
+        self.quote_wakeup.set()
         tasks = list(self.tasks.values())
         for task in tasks:
             task.cancel()

@@ -1,9 +1,9 @@
-"""CSV holdings import. Cash quantity is its monetary amount; price defaults to 1."""
+"""Portfolio file imports use quantities; the system supplies market prices."""
 
 import csv
 import io
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
@@ -21,6 +21,9 @@ class DraftPosition(Contract):
     exchange: str | None = Field(default=None, max_length=40)
     sector: str | None = Field(default=None, max_length=100)
     previous_close: Decimal | None = Field(default=None, ge=0)
+    price_as_of: datetime | None = None
+    price_session: date | None = None
+    price_source: str | None = None
 
     @field_validator("symbol")
     @classmethod
@@ -29,7 +32,7 @@ class DraftPosition(Contract):
 
 
 class CsvImportDraft(Contract):
-    """An unsaved import may lack share counts; it is never a portfolio snapshot."""
+    """An unsaved import awaits system prices and is never a portfolio snapshot."""
 
     as_of: datetime
     positions: list[DraftPosition] = Field(default_factory=list, max_length=1000)
@@ -92,15 +95,13 @@ def parse_holdings_csv(content: str, as_of: datetime) -> CsvImportDraft:
     reader.fieldnames = [
         aliases.get(name.strip().lower(), name.strip().lower()) for name in (reader.fieldnames or [])
     ]
-    if "symbol" not in reader.fieldnames or not ({"price", "quantity"} & set(reader.fieldnames)):
-        raise ValueError("Include ticker and price columns; a shares column can also be used")
+    if not {"symbol", "quantity"}.issubset(reader.fieldnames):
+        raise ValueError("Include ticker and quantity columns (symbol and shares also work)")
     if len(reader.fieldnames) != len(set(reader.fieldnames)):
-        raise ValueError("CSV has duplicate columns after matching ticker, price, and quantity names")
+        raise ValueError("CSV has duplicate columns after matching column names")
     positions, unsupported, cash, seen = [], [], Decimal(0), set()
 
-    def number(value, field, line, optional=False):
-        if (value is None or not value.strip()) and optional:
-            return None
+    def number(value, field, line):
         try:
             result = parse_amount(value)
             if not result.is_finite() or result < 0:
@@ -117,15 +118,10 @@ def parse_holdings_csv(content: str, as_of: datetime) -> CsvImportDraft:
         symbol = (row.get("symbol") or "").strip().upper()
         if not symbol or len(symbol) > 32:
             raise ValueError(f"Row {line}: provide a symbol of at most 32 characters")
-        quantity = number(row.get("quantity"), "quantity", line, True)
-        price = number(row.get("price"), "price", line, True)
+        quantity = number(row.get("quantity"), "quantity", line)
         kind = (row.get("asset_type") or "unknown").strip().lower()
         if kind == "cash" or (symbol in {"CASH", "USD"} and kind not in {"etf", "fund", "mutual_fund"}):
-            if quantity is None and price is None:
-                raise ValueError(f"Row {line}: cash needs an amount in quantity or price")
-            cash += (quantity if quantity is not None else Decimal(1)) * (
-                price if price is not None else Decimal(1)
-            )
+            cash += quantity
             continue
         if symbol in seen:
             raise ValueError(f"Row {line}: duplicate symbol {symbol}; combine lots first")
@@ -136,10 +132,8 @@ def parse_holdings_csv(content: str, as_of: datetime) -> CsvImportDraft:
             DraftPosition(
                 symbol=symbol,
                 quantity=quantity,
-                price=price,
                 asset_type=kind,
                 sector=(row.get("sector") or "").strip() or None,
-                previous_close=number(row.get("previous_close"), "previous_close", line, True),
             )
         )
     if not positions and cash == 0:
@@ -227,7 +221,7 @@ def parse_holdings_file(content: bytes, filename: str, as_of: datetime) -> CsvIm
     while columns and (rows[0][columns - 1] is None or not str(rows[0][columns - 1]).strip()):
         columns -= 1
     if not columns:
-        raise ValueError("The first row needs ticker and price column names")
+        raise ValueError("The first row needs ticker and quantity column names")
     if len(rows) > 1001:
         raise ValueError("The holdings worksheet is limited to 1,000 rows")
     stream = io.StringIO()

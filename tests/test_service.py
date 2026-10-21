@@ -20,7 +20,13 @@ from betafolio.storage import Store
 def app(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "build_dependencies", lambda *_: EngineDependencies())
     monkeypatch.setattr(module, "read_secret", lambda *_: None)
-    return ApplicationService(tmp_path, server=True)
+    application = ApplicationService(tmp_path, server=True)
+    # Isolate scheduling/delivery from model and source connection checks.
+    monkeypatch.setattr(application, 'research_readiness', lambda: {'state':'ready','issues':[]})
+    async def ready():
+        return None
+    monkeypatch.setattr(application, 'ensure_research_ready', ready)
+    return application
 
 
 def configure(app, **updates):

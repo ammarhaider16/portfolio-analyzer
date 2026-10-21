@@ -49,6 +49,8 @@ async def run_analysis(args, directory):
         if not snapshot:
             raise ValueError("Supply --request, --demo, or import holdings in the dashboard")
         request = service.request_for(snapshot)
+    if not args.offline and not args.demo:
+        await service.ensure_research_ready()
     initialization_warning = None
     try:
         dependencies = EngineDependencies() if args.offline or args.demo else build_dependencies(service.settings, service.secrets)

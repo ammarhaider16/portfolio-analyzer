@@ -125,13 +125,9 @@ def test_ticker_price_csv_needs_quantity_before_saving(tmp_path):
         token = csrf(client)
         body = {'csv': 'ticker,price\nSPUS,40.50', 'as_of': '2026-10-18T12:00:00Z'}
         preview = post(client, token, '/api/import', body)
-        assert preview.status_code == 200
-        assert preview.json()['positions'][0]['quantity'] is None
-        assert post(client, token, '/api/import', body | {'confirm': True}).status_code == 400
+        assert preview.status_code == 400
+        assert 'quantity' in preview.json()['detail'].lower()
         assert client.get('/api/status').json()['snapshot'] is None
-        draft = preview.json()
-        draft['positions'][0]['quantity'] = '3'
-        assert post(client, token, '/api/portfolio', {'snapshot': draft}).status_code == 200
 
 
 def test_csrf_origin_and_host_restrictions(tmp_path):
@@ -272,28 +268,6 @@ def test_research_token_can_read_research_cancel_but_cannot_mutate_or_email(tmp_
         assert client.get('/api/runs/' + run_id).json()['status'] == 'failed'
 
 
-def test_model_connection_probe_uses_real_portfolio_metrics(tmp_path, monkeypatch):
-    from betafolio import agent, web
-    from betafolio.models import ResearchNarrative
-    marker = object()
-    monkeypatch.setattr(web, 'create_model', lambda *args: marker)
-    calls = []
-    async def generate(model, request, metrics, sources, **kwargs):
-        assert model is marker
-        assert metrics['position_values']
-        assert set(metrics['position_values']) == {p.symbol for p in request.snapshot.positions}
-        assert float(metrics['known_value']) > 0
-        assert sources == []
-        calls.append(request)
-        return ResearchNarrative(executive_summary="Ready")
-    monkeypatch.setattr(agent, 'generate_narrative', generate)
-    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
-        response = post(client, csrf(client), '/api/test/model', {})
-        assert response.status_code == 200, response.text
-        assert len(calls) == 1
-        assert client.get('/api/status').json()['connection_tests']['model']['status'] == 'passed'
-        assert post(client, csrf(client), '/api/settings', {'model_enabled': True}).status_code == 200
-        assert 'model' not in client.get('/api/status').json()['connection_tests']
 
 
 @pytest.mark.parametrize('method,path', [
@@ -352,7 +326,7 @@ def test_delete_run_refuses_active_and_removes_finished(tmp_path):
 
 
 def test_safe_error_reason_maps_status_and_redacts():
-    from betafolio.web import safe_error_reason
+    from betafolio.service import safe_error_reason
 
     class Unauthorized(Exception):
         status_code = 401
@@ -361,30 +335,3 @@ def test_safe_error_reason_maps_status_and_redacts():
     redacted = safe_error_reason(Exception('bad key secret-abc'), 'secret-abc')
     assert 'secret-abc' not in redacted
     assert 'saved-provider-key' not in safe_error_reason(Exception('Invalid saved-provider-key'))
-
-
-def test_fr15_readiness_button_posts_and_shows_errors_verbatim(tmp_path, monkeypatch):
-    from betafolio import web
-    with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
-        token = csrf(client)
-        html = client.get('/').text
-        assert 'data-test="model-readiness"' in html
-        assert 'Test research readiness' in html
-        assert 'id="readiness-state"' in html
-        js = read_static('app.js')
-        assert '/api/model/readiness' in js
-        assert 'renderReadinessError(error.message)' in js  # 400 detail text rendered verbatim
-        # Without a configured key the endpoint answers 400; the UI shows its detail as-is.
-        missing = post(client, token, '/api/model/readiness', {})
-        assert missing.status_code == 400
-        assert missing.json()['detail']
-
-        async def fake(settings, secrets, model=None, api_key=None):
-            return {'ok': False, 'tool_calling': 'weak', 'structured_output': 'fail',
-                    'detail': 'The structured-output check failed — the reply contained no JSON object.'}
-
-        monkeypatch.setattr(web, 'probe_model_readiness', fake)
-        response = post(client, token, '/api/model/readiness', {})
-        assert response.status_code == 200, response.text
-        assert response.json() == {'ok': False, 'tool_calling': 'weak', 'structured_output': 'fail',
-                                   'detail': 'The structured-output check failed — the reply contained no JSON object.'}

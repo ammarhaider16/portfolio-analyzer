@@ -58,7 +58,7 @@ try {
   }
   const optional=await evaluate('state.settings.smtp === null && state.settings.schedule.enabled === false');
   if(!optional) throw new Error('Use a fresh smoke data directory with optional integrations disabled');
-  await evaluate("api('/api/settings',{search_provider:'disabled',primary_feeds_enabled:false,market_data_enabled:false,model_enabled:false}).then(()=>refresh())");
+  await evaluate("api('/api/settings',{search_provider:'disabled',primary_feeds_enabled:false,model_enabled:false}).then(()=>refresh())");
   await evaluate('document.querySelector("#run-form").requestSubmit()');
   await waitFor('Boolean(document.querySelector("#report-frame")?.getAttribute("src"))');
   if(!(await evaluate('Boolean(document.querySelector("#report-card").compareDocumentPosition(document.querySelector("#portfolio-editor")) & Node.DOCUMENT_POSITION_FOLLOWING)'))) throw new Error('Report is below the portfolio editor');
@@ -73,10 +73,8 @@ try {
   await evaluate('document.querySelector("#import-form").requestSubmit()');
   await waitFor('document.querySelector("#confirm-import").hidden === false');
   await waitFor('portfolioDirty && document.querySelector("#holdings-rows").children.length === 2');
-  if(!(await evaluate('document.activeElement === document.querySelector("#holdings-rows input[data-field=quantity]")'))) throw new Error('Import did not focus the first missing share count');
-  if(!(await evaluate('document.querySelector("#draft-progress").textContent.includes("2 share counts needed")'))) throw new Error('Import progress is not visible in the editor');
-  const missingShares=await evaluate('Array.from(document.querySelectorAll("#holdings-rows tr")).every(row=>row.querySelector("input[data-field=quantity]").value==="")');
-  if(!missingShares) throw new Error('Ticker/price CSV should leave shares unresolved for review');
+  if(!(await evaluate('Array.from(document.querySelectorAll("#holdings-rows input[data-field=quantity]")).every(field=>Number(field.value)>0)'))) throw new Error('Ticker/quantity import did not preserve share counts');
+  if(!(await evaluate('/ready to save/i.test(document.querySelector("#draft-progress").textContent)'))) throw new Error('Valid import draft is not ready to save');
   const initialRuns=await evaluate('state.history.length');
   await evaluate('document.querySelector("#run-form").requestSubmit()');
   await waitFor('document.querySelector("#notice").textContent.includes("Save or discard")');
@@ -88,7 +86,7 @@ try {
   if(await evaluate('document.querySelector("#holdings-rows").children.length') !== 3) throw new Error('Add/remove holding failed');
   await evaluate('document.querySelector("#portfolio-form").requestSubmit()');
   await waitFor('state.snapshot?.source === "manual" && !portfolioDirty');
-  const saved=await evaluate('JSON.stringify(state.snapshot)');
+  const saved=await evaluate('editableProjection(state.snapshot)');
   if(!(await evaluate('state.snapshot.cash === "2345.67" && state.snapshot.positions.length === 3 && state.snapshot.positions[2].symbol === "MSFT"'))) throw new Error('Saved edits do not match draft');
   await evaluate(`document.querySelector('#portfolio-cash').value='77';document.querySelector('#portfolio-cash').dispatchEvent(new Event('input'));refresh();`);
   await waitFor('state !== null');
@@ -97,19 +95,12 @@ try {
   await send('Page.reload');
   await pause(350);
   await waitFor('typeof state !== "undefined" && state?.snapshot?.source === "manual" && !portfolioDirty');
-  if(await evaluate('JSON.stringify(state.snapshot)') !== saved) throw new Error('Saved portfolio changed on reload');
-  // A background quote refresh may already have priced MSFT on a reused data directory.
-  // Clear that one price so the unpriced-holding coverage check stays deterministic.
-  await evaluate(`(async()=>{const status=await api('/api/status');const snapshot=status.snapshot;const holding=(snapshot.positions||[]).find(position=>position.symbol==='MSFT');if(holding&&holding.price!=null){holding.price=null;holding.previous_close=null;await api('/api/portfolio',{snapshot});await refresh();}})()`);
-  if(!(await evaluate('state.snapshot.positions.find(position=>position.symbol==="MSFT").price === null'))) throw new Error('Could not set up the unpriced holding');
+  if(await evaluate('editableProjection(state.snapshot)') !== saved) throw new Error('Saved portfolio changed on reload');
+  // Saved/live research must refuse missing connections instead of silently producing an offline briefing.
   await evaluate('document.querySelector("#run-form").requestSubmit()');
-  await waitFor(`state.history.length > ${initialRuns} && !state.history.some(row=>['queued','running'].includes(row.status))`);
-  const storedReport=await evaluate('state.history[0].status');
-  if(storedReport==='failed') throw new Error('Saved portfolio briefing failed');
-  await waitFor('document.querySelector("#report-frame").contentDocument?.body?.textContent.includes("Executive summary")');
-  if(await evaluate('document.querySelector("#report-detail").tagName === "DETAILS"')) throw new Error('Report should be visible without expansion');
-  if(!(await evaluate('document.querySelector("#value-coverage").textContent.includes("MSFT excluded") && document.querySelector("#allocation-note").textContent.includes("MSFT excluded")'))) throw new Error('Unpriced holding is not named beside allocation');
-  if(!(await evaluate('document.querySelector("#cap-events").textContent.includes("Unavailable") && document.querySelector("#cap-model").textContent.includes("Unavailable")'))) throw new Error('Research capability is not explained before running');
+  await waitFor('!runSubmitting && Boolean(runStartError)');
+  if(!(await evaluate('state.history.length === '+initialRuns+' && !document.querySelector("#run-progress").hidden && document.querySelector("#notice").hidden'))) throw new Error('Blocked research created a run or duplicated run notifications');
+  if(!(await evaluate('document.querySelector("#research-connection-status a")?.hash === "#connections"'))) throw new Error('Connection blockers have no setup action');
   await evaluate('document.querySelector("#report-card").scrollIntoView()');
   await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}).then(data=>writeFile('.tools/report-desktop.png',Buffer.from(data.data,'base64')));
   await evaluate('document.querySelector("#report-card").hidden=true');
@@ -168,5 +159,5 @@ try {
   await pause(200);
   if(!(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'))) throw new Error('Mobile layout overflows horizontally after dismissing alerts');
   if(errors.length) throw new Error('Browser exceptions: '+errors.join(', '));
-  console.log(JSON.stringify({demoReport:true,emailAndScheduleOptional:optional,preferencesSaved:true,csvImport:true,editableCash:true,addRemoveHoldings:true,unsavedRunBlocked:true,portfolioPersists:true,tabletLayout:true,mobileLayout:true,alertDismissal:true,modelKeyManage:true,reportDelete:true,clearFinished:true,boundedHistory:true,chartSingleLine:true,mobileNoOverflow:true,browserErrors:errors}));
+  console.log(JSON.stringify({demoReport:true,emailAndScheduleOptional:optional,preferencesSaved:true,csvImport:true,editableCash:true,connectionBlocker:true,addRemoveHoldings:true,unsavedRunBlocked:true,portfolioPersists:true,tabletLayout:true,mobileLayout:true,alertDismissal:true,modelKeyManage:true,reportDelete:true,clearFinished:true,boundedHistory:true,chartSingleLine:true,mobileNoOverflow:true,browserErrors:errors}));
 } finally {socket?.close();chrome.kill();}

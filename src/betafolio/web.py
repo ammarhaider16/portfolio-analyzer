@@ -28,8 +28,8 @@ from .models import AnalysisRequest, AnalysisResult, PortfolioSnapshot
 from .scheduling import next_session_run
 from .secrets import SecretStorageError
 from .service import (MODEL_PROVIDER_ALIASES, MODEL_PROVIDER_SLOTS, SECRET_ALIASES, ApplicationService,
-                      build_dependencies, create_model, probe_model_readiness, read_secret,
-                      resolve_secret, safe_error_reason, secret_status)
+                      read_secret,
+                      resolve_secret, secret_status)
 
 MODEL_SECRET_SLOTS = set(MODEL_PROVIDER_SLOTS.values()) | {"model_api_key"}
 DEPLOYMENT_SECRETS = {"tavily_api_key", "smtp_password"}
@@ -100,10 +100,12 @@ def create_app(directory: Path | None = None, server: bool | None = None):
     async def lifespan(app):
         service.store.recover()
         scheduler = asyncio.create_task(service.scheduler_loop())
+        price_worker = asyncio.create_task(service.quote_loop())
         yield
         scheduler.cancel()
+        price_worker.cancel()
         await service.close()
-        await asyncio.gather(scheduler, return_exceptions=True)
+        await asyncio.gather(scheduler, price_worker, return_exceptions=True)
 
     app = FastAPI(title="Betafolio research", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service = service
@@ -298,7 +300,8 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                 "externally_managed": sorted(externally_managed()), "next_run": next_run,
                 "verified_recipient": service.store.get("verified_recipient"), "server": server,
                 "scheduler_error": service.store.get("scheduler_error"),
-                "connection_tests": service.store.get("connection_tests", {}),
+                "connection_tests": await asyncio.to_thread(service.connection_tests),
+                "research_readiness": await asyncio.to_thread(service.research_readiness),
                 "secrets": secrets,
                 "secret_storage": storage,
                 "secrets_present": {name: secrets[name]["present"] for name in managed_secrets},
@@ -306,7 +309,6 @@ def create_app(directory: Path | None = None, server: bool | None = None):
 
     @app.get("/api/quotes")
     async def quotes():
-        await service.refresh_quotes()
         return service.quote_payload()
 
     @app.post("/api/settings")
@@ -342,6 +344,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
             tests.pop("search", None)
         service.store.set("connection_tests", tests)
         save_settings(directory, updated)
+        service.request_price_refresh()
         return {"ok": True}
 
     def clear_connection_test(kind):
@@ -405,91 +408,12 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         # Optional ?name=model_api_key_<provider> convention for API clients.
         return await remove_secret(name)
 
-    @app.post("/api/test/{kind}")
+    @app.post('/api/test/{kind}')
     async def test_connection(kind: str, request: Request):
-        if kind not in {"model", "search"}:
+        if kind not in {'model','search'}:
             raise HTTPException(404)
         value = await optional_probe_value(request)
-        try:
-            async with asyncio.timeout(50):
-                if kind == "model":
-                    from .agent import generate_narrative
-                    from .demo import demo_snapshot
-                    model = create_model(service.settings, service.secrets, api_key=value) if value is not None else create_model(service.settings, service.secrets)
-                    from .metrics import calculate_metrics
-                    snapshot = demo_snapshot()
-                    # Stage 1 distinguishes endpoint/auth/model problems from structured-output problems.
-                    if hasattr(model, "ainvoke"):
-                        try:
-                            await model.ainvoke("Reply with the single word ready.")
-                        except Exception as exc:
-                            raise ValueError("Model endpoint check failed: " + safe_error_reason(exc, value)) from None
-                    # Stage 2 exercises the structured-output request the briefing actually makes.
-                    try:
-                        narrative = await generate_narrative(model, AnalysisRequest(snapshot=snapshot, max_model_calls=2, max_seconds=40), calculate_metrics(snapshot), [])
-                        if not narrative or not (narrative.executive_summary or narrative.sections):
-                            raise ValueError("The model did not produce a readable briefing")
-                    except Exception as exc:
-                        raise ValueError("The endpoint answered, but it did not return the required structured response: " + safe_error_reason(exc, value)) from None
-                elif kind == "search":
-                    from .providers import probe_research_sources
-                    settings = service.settings.model_copy(update={"model_enabled": False})
-                    dep = build_dependencies(settings, service.secrets, tavily_key=value) if value is not None else build_dependencies(settings, service.secrets)
-                    snapshot = service.store.snapshot()
-                    position = snapshot.positions[0] if snapshot and snapshot.positions else None
-                    outcomes = await probe_research_sources(dep.research, symbol=position.symbol if position else "AAPL",
-                                                           name=position.instrument_name if position else None)
-                    tested_at = datetime.now(timezone.utc).isoformat()
-                    enabled = settings.search_provider != "disabled"
-                    configured = {
-                        "search": enabled and settings.search_provider != "disabled",
-                        "fed": enabled and settings.primary_feeds_enabled,
-                        "sec_filings": enabled and settings.sec_company_filings_enabled,
-                        "google_news": enabled and settings.ticker_news_enabled and "google_news" in settings.news_feed_sources,
-                        "nasdaq": enabled and settings.ticker_news_enabled and "nasdaq" in settings.news_feed_sources,
-                        "bing_news": enabled and settings.ticker_news_enabled and "bing_news" in settings.news_feed_sources,
-                    }
-                    for source, active in configured.items():
-                        if source not in outcomes:
-                            outcomes[source] = {"status": "skipped" if active else "disabled",
-                                                "reason": "Source is not configured or its credential is missing" if active else "Disabled in research settings",
-                                                "tested_at": tested_at}
-                    statuses = [item["status"] for item in outcomes.values() if item["status"] != "disabled"]
-                    aggregate = ("partial" if any(status in {"failed", "skipped"} for status in statuses)
-                                 else "passed" if statuses else "disabled")
-                    tests = service.store.get("connection_tests", {})
-                    tests[kind] = {"status": aggregate, "tested_at": tested_at, "sources": outcomes}
-                    service.store.set("connection_tests", tests)
-                    return {"ok": True, "message": "Source checks complete; review each source outcome.", "sources": outcomes}
-        except HTTPException:
-            raise
-        except ValueError:
-            tests = service.store.get("connection_tests", {})
-            tests[kind] = {"status": "failed", "tested_at": datetime.now(timezone.utc).isoformat()}
-            service.store.set("connection_tests", tests)
-            raise
-        except Exception as exc:
-            tests = service.store.get("connection_tests", {})
-            tests[kind] = {"status": "failed", "tested_at": datetime.now(timezone.utc).isoformat()}
-            service.store.set("connection_tests", tests)
-            raise ValueError("Connection test failed: " + safe_error_reason(exc, value)) from None
-        tests = service.store.get("connection_tests", {})
-        tests[kind] = {"status": "passed", "tested_at": datetime.now(timezone.utc).isoformat()}
-        service.store.set("connection_tests", tests)
-        return {"ok": True, "message": "Connection and required response format verified"}
-
-    @app.post("/api/model/readiness")
-    async def model_readiness(request: Request):
-        # Owner-context readiness probe of the configured chat model (FR-15,
-        # contract §8). Optional in-memory value: probed but never persisted.
-        value = await optional_probe_value(request)
-        try:
-            async with asyncio.timeout(65):
-                return await probe_model_readiness(service.settings, service.secrets, api_key=value)
-        except ValueError:
-            raise
-        except Exception as exc:
-            raise ValueError("Readiness check failed: " + safe_error_reason(exc, value)) from None
+        return await service.test_connection(kind,value)
 
     @app.post("/api/import")
     async def import_holdings(request: Request):
@@ -504,6 +428,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
                 raise ValueError("Enter quantities for every holding before saving the imported portfolio")
             saved = validate_portfolio_snapshot(PortfolioSnapshot.model_validate(snapshot.model_dump()))
             service.store.save_snapshot(saved)
+            service.request_price_refresh()
         return snapshot.model_dump(mode="json")
 
     @app.post("/api/import/file")
@@ -524,7 +449,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
 
     @app.get("/api/import/template")
     async def import_template():
-        return PlainTextResponse("ticker,price,quantity\nAAPL,200,10\nCASH,1000,\n", media_type="text/csv",
+        return PlainTextResponse("ticker,quantity\nAAPL,10\nCASH,1000\n", media_type="text/csv",
                                  headers={"Content-Disposition": 'attachment; filename="portfolio-template.csv"'})
 
     @app.post("/api/portfolio")
@@ -533,6 +458,7 @@ def create_app(directory: Path | None = None, server: bool | None = None):
         snapshot.source = "manual"
         snapshot.account_id = "manual"
         service.store.save_snapshot(snapshot)
+        service.request_price_refresh()
         return snapshot.model_dump(mode="json")
 
     @app.post("/api/portfolio/enrich")
@@ -545,6 +471,11 @@ def create_app(directory: Path | None = None, server: bool | None = None):
     async def create_run(submission: RunSubmission, request: Request):
         if request.state.api_authorized and submission.send_email:
             raise HTTPException(403, "Research API tokens cannot request email delivery")
+        if submission.source != 'demo':
+            try:
+                await service.ensure_research_ready()
+            except ValueError as error:
+                raise HTTPException(409,str(error)) from None
         run_id = service.submit(submission.analysis, submission.source, submission.send_email,
                                 overrides={"question": submission.question, "include_suggestions": submission.include_suggestions})
         return {"run_id": run_id, "status": "queued", "result_url": "/api/runs/" + run_id}

@@ -12,9 +12,9 @@ from betafolio.web import create_app
 
 def test_excel_upload_returns_a_draft_and_never_saves(tmp_path):
     book = openpyxl.Workbook()
-    book.active.append(["Ticker", "Price"])
-    book.active.append(["AAPL", 200])
-    book.active.append(["CASH", 1500])
+    book.active.append(["Ticker", "Shares", "Price", "Previous_close"])
+    book.active.append(["AAPL", 10, "invalid", "invalid"])
+    book.active.append(["CASH", 1500, 100, 100])
     content = BytesIO()
     book.save(content)
     with TestClient(create_app(tmp_path), base_url="http://127.0.0.1:8000") as client:
@@ -30,8 +30,9 @@ def test_excel_upload_returns_a_draft_and_never_saves(tmp_path):
         )
         assert response.status_code == 200, response.text
         draft = response.json()
-        assert draft["cash"] == "1500" and draft["positions"][0]["quantity"] is None
-        assert draft["positions"][0]["price"] == "200"
+        assert draft["cash"] == "1500" and draft["positions"][0]["quantity"] == "10"
+        assert draft["positions"][0]["price"] is None
+        assert draft["positions"][0]["previous_close"] is None
         assert client.get("/api/status").json()["snapshot"] is None
 
 

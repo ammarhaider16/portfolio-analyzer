@@ -6,7 +6,6 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from betafolio import agent, web
 from betafolio.config import ModelConfig, Settings, save_settings
 from betafolio.service import create_model
 from betafolio.web import create_app
@@ -156,16 +155,13 @@ def test_deployment_managed_slot_rejects_edit_without_echo(tmp_path, monkeypatch
 def test_test_endpoint_uses_value_without_persisting(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_create(settings, store, api_key=None):
+    from betafolio import service
+
+    async def fake_probe(settings, store, model=None, api_key=None):
         captured['key'] = api_key
-        return object()
+        return {'ok': True, 'steps': [], 'detail': 'Ready'}
 
-    async def fake_generate(model, request, metrics, sources, **kwargs):
-        from betafolio.models import ResearchNarrative
-        return ResearchNarrative(executive_summary="Ready")
-
-    monkeypatch.setattr(web, 'create_model', fake_create)
-    monkeypatch.setattr(agent, 'generate_narrative', fake_generate)
+    monkeypatch.setattr(service, 'probe_model_readiness', fake_probe)
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
         token = csrf(client)
         secret = 'typed-but-never-saved'

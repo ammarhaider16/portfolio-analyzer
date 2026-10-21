@@ -49,6 +49,9 @@ class PortfolioEnrichmentAgent:
                     quote = priced.positions[0]
                     if updated.price is None and quote.price is not None:
                         updated.price = quote.price
+                        updated.price_as_of = quote.price_as_of
+                        updated.price_session = quote.price_session
+                        updated.price_source = quote.price_source
                         filled.append("price")
                     if updated.price is not None and updated.previous_close is None and quote.previous_close is not None:
                         updated.previous_close = quote.previous_close

@@ -54,7 +54,7 @@ def test_refresh_updates_prices_but_never_quantity_cash_or_as_of(tmp_path):
     store = saved(tmp_path)
     retrieved = datetime(2026, 10, 16, 15, 0, tzinfo=timezone.utc)  # Friday, US market open
     provider = FakeProvider({"ABC": quote(retrieved_at=retrieved.isoformat())})
-    service = QuoteService(store, provider, lambda: settings(auto_prices_enabled=True, price_refresh_minutes=15))
+    service = QuoteService(store, provider, lambda: settings())
     asyncio.run(service.refresh(now=retrieved))
     assert provider.calls == 1
     persisted = store.snapshot()
@@ -73,7 +73,7 @@ def test_second_call_within_ttl_does_not_refetch(tmp_path):
     store = saved(tmp_path)
     retrieved = datetime(2026, 10, 16, 15, 0, tzinfo=timezone.utc)
     provider = FakeProvider({"ABC": quote(retrieved_at=retrieved.isoformat())})
-    service = QuoteService(store, provider, lambda: settings(auto_prices_enabled=True, price_refresh_minutes=15))
+    service = QuoteService(store, provider, lambda: settings())
     asyncio.run(service.refresh(now=retrieved))
     asyncio.run(service.refresh(now=retrieved + timedelta(seconds=59)))
     assert provider.calls == 1
@@ -89,7 +89,7 @@ def test_partial_quotes_leave_missing_symbols_untouched(tmp_path):
                                           positions=[Position(symbol="ABC", quantity="1", price="50"),
                                                       Position(symbol="XYZ", quantity="1", price="5")]))
     provider = FakeProvider({"ABC": quote(price="60", previous_close="59")})
-    service = QuoteService(store, provider, lambda: settings(auto_prices_enabled=True))
+    service = QuoteService(store, provider, lambda: settings())
     asyncio.run(service.refresh(now=datetime.now(timezone.utc)))
     persisted = {position.symbol: position for position in store.snapshot().positions}
     assert persisted["ABC"].price == Decimal("60")
@@ -97,20 +97,15 @@ def test_partial_quotes_leave_missing_symbols_untouched(tmp_path):
     assert set(store.get("prices_as_of")) == {"ABC"}
 
 
-def test_disabled_auto_prices_never_fetches(tmp_path):
-    store = saved(tmp_path)
-    provider = FakeProvider({"ABC": quote()})
-    service = QuoteService(store, provider, lambda: settings(auto_prices_enabled=False))
-    asyncio.run(service.refresh())
-    assert provider.calls == 0
-    assert store.snapshot().positions[0].price == Decimal("50")
-    assert store.get("prices_as_of") is None
+def test_default_refresh_is_sixty_seconds_even_when_market_closed(tmp_path):
+    service = QuoteService(saved(tmp_path), FakeProvider(), lambda: settings())
+    assert service.ttl_seconds(datetime(2026, 10, 18, 2, tzinfo=timezone.utc)) == 60
 
 
 def test_provider_failure_leaves_saved_prices(tmp_path):
     store = saved(tmp_path)
     provider = FakeProvider({"ABC": quote()})
-    service = QuoteService(store, provider, lambda: settings(auto_prices_enabled=True))
+    service = QuoteService(store, provider, lambda: settings())
 
     async def boom(symbols):
         raise RuntimeError("offline")
@@ -133,6 +128,7 @@ def test_api_quotes_returns_saved_portfolio_shape(tmp_path, monkeypatch):
                     "positions": [{"symbol": "ABC", "quantity": "2", "price": None}]}
         response = client.post("/api/portfolio", json={"snapshot": snapshot}, headers={"x-csrf-token": token})
         assert response.status_code == 200, response.text
+        client.portal.call(client.app.state.service.refresh_quotes, True)
         data = client.get("/api/quotes").json()
         assert set(data) == {"prices", "as_of", "refresh_seconds"}
         assert data["prices"]["ABC"]["price"] == "12.5"

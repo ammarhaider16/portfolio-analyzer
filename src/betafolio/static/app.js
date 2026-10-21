@@ -1,6 +1,8 @@
 "use strict";
 const $ = (selector) => document.querySelector(selector);
-let state = null, importDraft = null, selectedReport = null, lastAutoReport = null, pendingRunId = null, currentReportRow = null;
+let state = null, importDraft = null, selectedReport = null, lastAutoReport = null, pendingRunId = null, currentReportRow = null, runSubmitting = false;
+let runStatusId = null, runStartError = '';
+let modelTestContext = null;
 const runQuestions = new Map();
 const csrf = $('meta[name="csrf-token"]').content;
 function alertBox(selector) {
@@ -156,26 +158,28 @@ async function refreshActivity(rows){
   if(selectedTrace&&!rows.some(row=>row.id===selectedTrace))selectedTrace=null;
   const running=rows.find(row=>['queued','running'].includes(row.status));const row=rows.find(row=>row.id===selectedTrace)||running||rows[0];
   if(row){select.value=row.id;try{renderResearchActivity(await api(`/api/runs/${encodeURIComponent(row.id)}`));}catch{$('#activity-status').textContent='Trace temporarily unavailable. It will refresh automatically.';}}else renderResearchActivity(null);
-  $('#run-progress').hidden=!running;if(running)$('#run-progress-text').textContent=running.status==='queued'?'Research queued':'Research in progress';
+  const recent=rows.find(item=>item.id===runStatusId);
+  $('#run-progress').hidden=!running&&!recent&&!runSubmitting&&!runStartError;
+  if(!runSubmitting)$('#run-progress-text').textContent=running?(running.status==='queued'?'Research queued':'Research in progress'):runStartError|| (recent?(recent.status==='failed'?'Research failed. Inspect the agent trace for details.':'Your briefing is ready.'):'');
 }
 
-function goToIssue(actionName){if(actionName==='portfolio'){view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});return;}view('connections');$('#research-setup').open=true;$('#research-setup').scrollIntoView({behavior:'smooth'});}
+function goToIssue(actionName){if(actionName==='portfolio'){view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});return;}view('connections');$('#research-setup').scrollIntoView({behavior:'smooth'});}
 
-const READINESS_GRADES={ok:{label:'Ready',cls:'readiness-ok'},weak:{label:'Weak',cls:'readiness-weak'},fail:{label:'Not ready',cls:'readiness-fail'}};
-function readinessLine(name,grade){const meta=READINESS_GRADES[grade]||READINESS_GRADES.fail;return {text:`${name}: ${meta.label}`,cls:meta.cls};}
 function renderReadiness(result) {
   const box=$('#readiness-state');if(!box)return;
   box.hidden=false;box.replaceChildren();
-  if(!result){const pending=document.createElement('p');pending.className='readiness-detail';pending.textContent='Checking tool calling and structured output…';box.append(pending);return;}
-  for(const [name,grade] of [['Tool calling',result.tool_calling],['Structured output',result.structured_output]]){
-    const line=readinessLine(name,grade);
-    const span=document.createElement('span');span.className=`readiness-grade ${line.cls}`;span.textContent=line.text;box.append(span);
+  if(!result){box.dataset.testing='true';const pending=document.createElement('p');pending.className='readiness-detail';pending.textContent='Checking connection, tool calling, and briefing output…';box.append(pending);return;}
+  delete box.dataset.testing;
+  box.dataset.testedAt=result.tested_at||new Date().toISOString();
+  for(const step of result.steps||[]){
+    const span=document.createElement('p');span.className=`readiness-grade ${step.status==='passed'?'readiness-ok':step.status==='failed'?'readiness-fail':'readiness-skipped'}`;span.textContent=`${step.label}: ${step.status==='skipped'?'Not run':step.status==='passed'?'Passed':'Failed'}${step.message?' | '+step.message:''}`;box.append(span);
   }
-  const detail=document.createElement('p');detail.className='readiness-detail';detail.textContent=String(result.detail||'');box.append(detail);
+  const detail=document.createElement('p');detail.className='readiness-detail';detail.textContent=String(result.message||'');box.append(detail);
 }
 function renderReadinessError(message) {
   const box=$('#readiness-state');if(!box)return;
   box.hidden=false;box.replaceChildren();
+  delete box.dataset.testing;
   const error=document.createElement('p');error.className='readiness-grade readiness-fail';error.textContent=String(message||'');box.append(error);
 }
 
@@ -188,7 +192,8 @@ function updateDraftProgress() {
   const missing=[];const names=[];
   for(const row of $('#holdings-rows').children){const fields=[...row.querySelectorAll('input,select')];const quantity=fields.find(field=>field.dataset.field==='quantity');if(quantity&&!quantity.value.trim()){missing.push(quantity);names.push(fields.find(field=>field.dataset.field==='symbol')?.value||'unnamed holding');}}
   const cashMissing=!$('#portfolio-cash').value.trim();
-  progress.textContent=`${activeImportSource} draft | positions dated ${dateLabel($('#portfolio-date').value)}. ${missing.length} ${missing.length===1?'share count':'share counts'} needed${names.length?`: ${names.join(', ')}`:''}${cashMissing?'; cash balance needed':''}. Review then save.`;
+  const progressMessage=missing.length?`${missing.length} ${missing.length===1?'share count':'share counts'} needed: ${names.join(', ')}`:cashMissing?'Cash balance needed':'Ready to save after review';
+  progress.textContent=`${activeImportSource} draft | positions dated ${dateLabel($('#portfolio-date').value)}. ${progressMessage}${missing.length&&cashMissing?'; cash balance needed':''}.`;
 }
 function markPortfolioDirty() { portfolioDirty=true; editStatus('Unsaved changes. Save holdings and cash before starting a briefing.'); updateDraftProgress(); }
 function focusFirstMissing(){let input=null;for(const row of $('#holdings-rows').children){input=[...row.querySelectorAll('input,select')].find(field=>field.dataset.field==='quantity'&&!field.value.trim());if(input)break;}(input||(!$('#portfolio-cash').value.trim()?$('#portfolio-cash'):null))?.focus();}
@@ -314,6 +319,8 @@ function renderAllocation(snapshot) {
 function updateResearchReadiness() {
   if(!state)return;
   const settings=state.settings, tests=state.connection_tests||{}, hasPortfolio=Boolean(state.snapshot);
+  const context=JSON.stringify([settings.model,settings.model_enabled,state.secrets?.model_api_key]);
+  if(modelTestContext!==context){const results=$('#readiness-state');results.hidden=true;results.replaceChildren();delete results.dataset.testedAt;delete results.dataset.testing;modelTestContext=context;}
   const searchConfigured=settings.search_provider==='keyless'||(settings.search_provider==='tavily'&&state.secrets_present.tavily_api_key)||(settings.search_provider!=='disabled'&&(settings.primary_feeds_enabled||settings.sec_company_filings_enabled||settings.ticker_news_enabled));
   const modelConfigured=settings.model_enabled&&state.secrets_present.model_api_key;
   const sourceTests=tests.search?.sources;
@@ -326,7 +333,7 @@ function updateResearchReadiness() {
   const chips=$('#source-states');chips.replaceChildren();
   const enabled=settings.search_provider!=='disabled';
   const sourceSettings={search:enabled,fed:enabled&&settings.primary_feeds_enabled,sec_filings:enabled&&settings.sec_company_filings_enabled,google_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('google_news'),nasdaq:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('nasdaq'),bing_news:enabled&&settings.ticker_news_enabled&&(settings.news_feed_sources||[]).includes('bing_news')};
-  const sourceLabels={search:settings.search_provider==='tavily'?'Tavily':'Web search',fed:'Federal Reserve',sec_filings:'SEC filings',google_news:'Google News',nasdaq:'Nasdaq',bing_news:'Bing News'};
+  const sourceLabels={search:settings.search_provider==='tavily'?'Tavily':'DDGS web search',fed:'Federal Reserve',sec_filings:'SEC filings',google_news:'Google News',nasdaq:'Nasdaq',bing_news:'Bing News'};
   for(const [name,active] of Object.entries(sourceSettings)){
     const result=sourceTests?.[name];const chip=document.createElement('span');chip.className='badge';
     const status=result?.status||(!active?'disabled':name==='sec_filings'&&!settings.sec_contact?'skipped':'not tested');
@@ -337,13 +344,16 @@ function updateResearchReadiness() {
   updateSecAvailability();
   $('#tavily-fields').hidden=settings.search_provider!=='tavily';
   const newsSources=$('#news-source-fields'); if(newsSources) newsSources.hidden=!settings.ticker_news_enabled;
-  const question=$('#run-form').elements.question.value;
-  const asksCurrent=/\b(recent|latest|today|now|news|events?|earnings|filings?)\b/i.test(question);
+  const readiness=state.research_readiness;
+  const connectionStatus=$('#research-connection-status');connectionStatus.replaceChildren();
+  if(readiness?.issues?.length){for(const issue of readiness.issues){const line=document.createElement('p');line.textContent=issue.message+' ';const link=document.createElement('a');link.href='#connections';link.textContent=issue.kind==='model'?'Configure model':'Configure news sources';link.addEventListener('click',event=>{event.preventDefault();view('connections');const target=document.getElementById(issue.target);target?.scrollIntoView({behavior:'smooth',block:'center'});target?.querySelector('input,select')?.focus({preventScroll:true});});line.append(link);connectionStatus.append(line);}}
+  else connectionStatus.textContent=readiness?.state==='ready'?'Connections ready for research.':'Connections will be checked before research starts.';
+  if(!readiness?.issues?.length&&readiness?.state==='needs_check'){const line=document.createElement('p');line.textContent='Your connections will be checked automatically before the first run.';connectionStatus.append(line);}
+  if(tests.model?.steps&&!$('#readiness-state').dataset.testing&&(!$('#readiness-state').dataset.testedAt||new Date(tests.model.tested_at)>new Date($('#readiness-state').dataset.testedAt)))renderReadiness(tests.model);
   const wantsIdeas=$('#run-form').elements.include_suggestions.checked;
-  const eventGap=asksCurrent&&!(searchConfigured&&modelConfigured&&testedWorkingSources>0&&tests.model?.status==='passed');
-  const ideaGap=wantsIdeas&&(!settings.investment_profile||!modelConfigured);
-  const warning=$('#question-readiness');warning.hidden=!eventGap&&!ideaGap;
-  if(!warning.hidden)warning.textContent=[eventGap?'A recent-events answer needs current-event search and a tested model. This run may show portfolio measures without answering that question.':'',ideaGap?'Adjustment ideas need a complete investment profile and a working model.':''].filter(Boolean).join(' ');
+  const warning=$('#question-readiness');warning.hidden=!wantsIdeas||Boolean(settings.investment_profile);
+  if(!warning.hidden)warning.textContent='Adjustment ideas need a complete investment profile in Preferences.';
+
 }
 
 function updateSecAvailability(){
@@ -451,12 +461,11 @@ async function refresh(populate=false) {
   $('#source-label').textContent=snapshot ? 'LAST SAVED PORTFOLIO' : 'NO PORTFOLIO SAVED';
   $('#top-status').textContent=snapshot ? `Positions as of ${dateLabel(snapshot.as_of)}` : 'Add positions to begin';
   $('#next-run').textContent=state.next_run ? `Next scheduled run: ${dateLabel(state.next_run)}` : 'Research available on demand';
-  const latest=state.history[0]; $('#latest-status').textContent=latest ? latest.summary||({queued:'Queued',running:'Research in progress',failed:'Run failed'}[latest.status]||'Report ready') : 'No reports yet';
+  const latest=state.history[0], latestSummary=state.history.find(row=>['success','partial'].includes(row.status)&&row.summary); $('#latest-research').hidden=!latestSummary;$('#latest-status').textContent=latestSummary?.summary||'';
   const active=state.history.some(row => ['queued','running'].includes(row.status));
-  $('#run-button').disabled=active; $('#run-button').textContent=active ? 'Research in progress…' : 'Run research →';
+  $('#run-button').disabled=active||runSubmitting; $('#run-button').textContent=runSubmitting?'Checking connections…':active?'Research in progress…':'Run research →';
   $('#run-email-wrap').hidden=!(s.smtp && state.verified_recipient === s.smtp.recipient);
   $('#email-state').textContent=s.smtp ? (state.verified_recipient===s.smtp.recipient ? `Verified: ${s.smtp.recipient}` : 'Next: send a verification email and enter the code.') : 'First save your mail server settings.';
-  $('#research-connection-status').textContent='Connection tests above show whether current-event and written research can be checked before a run.';
   updateResearchReadiness();
   $('#logout').hidden=!state.server;
   if (populate) {
@@ -483,7 +492,7 @@ async function refresh(populate=false) {
   updateReportHeading();
   await refreshActivity(state.history);
   if(latest && ['success','partial'].includes(latest.status) && latest.id!==lastAutoReport && !selectedReport) {openReport(latest.id); lastAutoReport=latest.id;}
-  if(pendingRunId){const pending=state.history.find(row=>row.id===pendingRunId);if(pending&&['success','partial','failed'].includes(pending.status)){pendingRunId=null;notice(pending.status==='failed'?'Research failed. Check the run in history.':'Your briefing is ready.',pending.status==='failed');if(pending.status!=='failed')await openReport(pending.id,true);}}
+  if(pendingRunId){const pending=state.history.find(row=>row.id===pendingRunId);if(pending&&['success','partial','failed'].includes(pending.status)){pendingRunId=null;if(pending.status!=='failed'&&selectedReport!==pending.id)await openReport(pending.id,true);}}
 }
 async function refreshQuotes() {
   if(portfolioDirty || document.hidden || !state || !state.snapshot) return;
@@ -542,7 +551,7 @@ function renderSecretFields(force=false) {
       const text=document.createElement('span');text.className='secret-status-text';
       const change=button('Change secret',()=>{input.hidden=false;input.dataset.editing='true';input.placeholder='Enter replacement secret';cancel.hidden=false;input.focus();});change.classList.add('secret-change');
       const remove=button('Remove key',async()=>{if(!window.confirm(`Remove the saved ${spec.title} key?`))return;await api(`/api/secrets/${spec.key}`,undefined,'DELETE');input.value='';input.dataset.editing='false';await refresh();notice('Key removed.');});remove.classList.add('secret-remove');
-      const test=button('Test this key',async()=>{const value=input.value.trim();if(!value){notice('Type a key first, or Save to persist it.',true);return;}await api(`/api/test/${spec.test}`,{value});notice('Key verified without saving.');});test.classList.add('secret-test');
+      const test=button('Test this key',async()=>{const value=input.value.trim();if(!value){notice('Type a key first, or Save to persist it.',true);return;}if(spec.test==='model')renderReadiness(null);const result=await api(`/api/test/${spec.test}`,{value});if(spec.test==='model')renderReadiness(result);else notice(result.message);});test.classList.add('secret-test');
       const cancel=button('Cancel',()=>{input.value='';input.dataset.editing='false';renderSecretFields(true);});cancel.classList.add('secret-cancel');
       box.append(text,change,remove,test,cancel);label.append(box);
     }
@@ -568,12 +577,13 @@ if($('#login-form')) {
   $('#run-form').elements.question.closest('label').after($('#question-readiness'));
   $('#run-form').elements.question.addEventListener('input',updateResearchReadiness);
   $('#run-form').elements.include_suggestions.addEventListener('change',updateResearchReadiness);
-  $('.research-card [data-view="connections"]').addEventListener('click',()=>{$('#research-setup').open=true;$('#research-setup').scrollIntoView({behavior:'smooth'});});
+  $('.research-card [data-view="connections"]').addEventListener('click',()=>{$('#research-setup').scrollIntoView({behavior:'smooth'});});
   const reportFrame=$('#report-frame'); if(reportFrame) reportFrame.addEventListener('load',sizeReportFrame);
   window.addEventListener('resize',()=>{if(reportFrame&&!$('#report-card').hidden)sizeReportFrame();});
   window.addEventListener('hashchange',()=>{const target=viewFromHash(window.location.hash);if(target&&target!==currentView)view(target,false);});
   const initialView=viewFromHash(window.location.hash); if(initialView) view(initialView,false);
   $('#trace-run').addEventListener('change',action(async event=>{selectedTrace=event.target.value;await refreshActivity(state.history);}));
+  $('#run-progress [data-view="activity"]').addEventListener('click',action(async()=>{selectedTrace=state.history.find(row=>['queued','running'].includes(row.status))?.id||runStatusId;await refreshActivity(state.history);}));
   $('#refresh').addEventListener('click',action(()=>refresh()));
   $('#clear-history').addEventListener('click',action(async()=>{
     const finished=(state.history||[]).filter(row=>!['queued','running'].includes(row.status));
@@ -585,10 +595,14 @@ if($('#login-form')) {
   }));
   $('#logout').addEventListener('click',action(async()=>{await api('/api/logout',{});window.location.reload();}));
   $('#run-form').addEventListener('submit',action(async()=>{
-    if(portfolioDirty) {view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});throw new Error('Save or discard your portfolio edits before starting a briefing.');}
-    const data=values('#run-form'); data.include_suggestions=checked('#run-form','include_suggestions'); data.send_email=checked('#run-form','send_email');
-    const run=await api('/api/runs',data);pendingRunId=run.run_id;runQuestions.set(run.run_id,String(data.question||''));selectedReport=null;$('#run-form').elements.include_suggestions.checked=false;
-    notice('Research started. Follow the run in Activity; your briefing will appear here.'); await refresh();
+    if(runSubmitting||runActive())return;
+    if(portfolioDirty){view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});throw new Error('Save or discard your portfolio edits before starting a briefing.');}
+    runSubmitting=true;runStartError='';runStatusId=null;$('#run-button').disabled=true;$('#run-button').textContent='Checking connections…';$('#run-progress').hidden=false;$('#run-progress-text').textContent='Checking connections…';$('#notice').hidden=true;
+    try{
+      const data=values('#run-form');data.include_suggestions=checked('#run-form','include_suggestions');data.send_email=checked('#run-form','send_email');
+      const run=await api('/api/runs',data);pendingRunId=run.run_id;runStatusId=run.run_id;runQuestions.set(run.run_id,String(data.question||''));selectedReport=null;$('#run-form').elements.include_suggestions.checked=false;
+    }catch(error){runStartError=error.message;}
+    finally{runSubmitting=false;await refresh();}
   }));
   const upload=$('#import-form').elements.file, dropzone=$('#upload-zone');
   function selectedFile(){const file=upload.files[0];$('#upload-label').textContent=file?file.name:'Drop your portfolio here';dropzone.classList.toggle('has-file',Boolean(file));}
@@ -602,7 +616,7 @@ if($('#login-form')) {
     const content_base64=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Unable to read this file.'));reader.readAsDataURL(file);});
     const preview=await api('/api/import/file',{filename:file.name,content_base64,as_of:new Date(form.elements.as_of.value).toISOString()});
     loadPortfolio(preview,true);const missing=preview.positions.filter(p=>p.quantity===null||p.quantity===undefined||p.quantity==='').length;
-    $('#import-preview').hidden=false;$('#import-preview').textContent=`${preview.positions.length} holdings imported. ${missing?`${missing} need shares. `:''}Review prices and cash before saving.`;$('#confirm-import').hidden=false;
+    $('#import-preview').hidden=false;$('#import-preview').textContent=`${preview.positions.length} holdings imported. ${missing?`${missing} need shares. `:''}Review quantities and cash before saving.`;$('#confirm-import').hidden=false;
     view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});focusFirstMissing();notice('Portfolio imported as a draft. Review your holdings and cash, then save.');
   }));
   $('#confirm-import').addEventListener('click',()=>{view('desk');$('#portfolio-editor').scrollIntoView({behavior:'smooth'});focusFirstMissing();});
@@ -610,9 +624,9 @@ if($('#login-form')) {
   $('#fill-details').addEventListener('click',action(async()=>{
     const rows=[...$('#holdings-rows').children];if(!rows.length)throw new Error('Add a ticker or import holdings first.');
     if(rows.length>30)throw new Error('Fill details supports up to 30 holdings at a time. Review a smaller draft.');
-    const positions=rows.map(row=>{const item={};for(const input of row.querySelectorAll('input,select'))item[input.dataset.field]=input.value.trim();item.symbol=item.symbol.toUpperCase();item.quantity=item.quantity?amount(item.quantity,`${item.symbol} shares`):null;const known=pricesBySymbol.get(item.symbol)||{};item.price=priceValue(known.price);item.previous_close=priceValue(known.previous_close);for(const field of ['instrument_name','exchange','sector'])item[field]=item[field]||null;return item;});
+    const positions=rows.map(row=>{const item={};for(const input of row.querySelectorAll('input,select'))item[input.dataset.field]=input.value.trim();item.symbol=item.symbol.toUpperCase();item.quantity=item.quantity?amount(item.quantity,`${item.symbol} shares`):null;const known=pricesBySymbol.get(item.symbol)||{};item.price=priceValue(known.price);item.previous_close=priceValue(known.previous_close);item.price_as_of=known.price_as_of||null;item.price_session=known.price_session||null;item.price_source=known.price_source||null;for(const field of ['instrument_name','exchange','sector'])item[field]=item[field]||null;return item;});
     const control=$('#fill-details');control.disabled=true;notice('Looking up missing instrument details and available prices.');
-    try{const result=await api('/api/portfolio/enrich',{positions});result.positions.forEach((position,index)=>{const row=rows[index];for(const [field,value] of Object.entries(position)){const input=[...row.querySelectorAll('input,select')].find(element=>element.dataset.field===field);if(input&&value!==null&&value!==undefined)input.value=value;}if(position.price!==null&&position.price!==undefined){pricesBySymbol.set(position.symbol,{price:position.price,previous_close:position.previous_close});const cell=row.querySelector('.holding-price');if(cell)cell.textContent=formatPrice(position.price);}});markPortfolioDirty();const names=result.changes.map(item=>`${item.symbol}: ${item.fields.join(', ')}${item.price_as_of?` (daily close ${item.price_as_of})`:''}${item.source?` via ${item.source}`:''}`);notice(names.length?`Added ${names.join('; ')}. Review and save your portfolio. Quantity is never inferred.`:'No additional details were available. Check ticker symbols or enter values manually.');}
+    try{const result=await api('/api/portfolio/enrich',{positions});result.positions.forEach((position,index)=>{const row=rows[index];for(const [field,value] of Object.entries(position)){const input=[...row.querySelectorAll('input,select')].find(element=>element.dataset.field===field);if(input&&value!==null&&value!==undefined)input.value=value;}if(position.price!==null&&position.price!==undefined){pricesBySymbol.set(position.symbol,{...position,price:position.price,previous_close:position.previous_close});const cell=row.querySelector('.holding-price');if(cell)cell.textContent=formatPrice(position.price);}});markPortfolioDirty();const names=result.changes.map(item=>`${item.symbol}: ${item.fields.join(', ')}${item.price_as_of?` (daily close ${item.price_as_of})`:''}${item.source?` via ${item.source}`:''}`);notice(names.length?`Added ${names.join('; ')}. Review and save your portfolio. Quantity is never inferred.`:'No additional details were available. Check ticker symbols or enter values manually.');}
     finally{control.disabled=false;}
   }));
   $('#portfolio-date').addEventListener('input',markPortfolioDirty);
@@ -634,21 +648,17 @@ if($('#login-form')) {
   }));
   $('#research-form').addEventListener('submit',action(async()=>{
     const data=values('#research-form'), tavily=(data.key||'').trim();
-    await save({search_provider:data.search_provider,sec_contact:data.sec_contact,primary_feeds_enabled:checked('#research-form','primary_feeds_enabled'),sec_company_filings_enabled:checked('#research-form','sec_company_filings_enabled'),ticker_news_enabled:checked('#research-form','ticker_news_enabled'),news_feed_sources:['google_news','nasdaq','bing_news'].filter(name=>checked('#research-form',`news_source_${name}`)),auto_prices_enabled:checked('#research-form','auto_prices_enabled'),price_refresh_minutes:Number(data.price_refresh_minutes),market_data_enabled:checked('#research-form','market_data_enabled')},true);
+    await save({search_provider:data.search_provider,sec_contact:data.sec_contact,primary_feeds_enabled:checked('#research-form','primary_feeds_enabled'),sec_company_filings_enabled:checked('#research-form','sec_company_filings_enabled'),ticker_news_enabled:checked('#research-form','ticker_news_enabled'),news_feed_sources:['google_news','nasdaq','bing_news'].filter(name=>checked('#research-form',`news_source_${name}`)),price_refresh_seconds:Number(data.price_refresh_seconds)},true);
     // Only store a provider's key when that provider is actually selected.
     if(data.search_provider==='tavily'&&tavily){await api('/api/secrets/tavily_api_key',{value:tavily});const input=$('#research-form').elements.key;input.value='';input.dataset.editing='false';}
     await refresh(); notice('Research settings saved.');
   }));
-  document.querySelectorAll('[data-test]:not([data-test="model-readiness"])').forEach(el=>el.addEventListener('click',action(async()=>{el.disabled=true;notice('Testing the saved connection…');try{const result=await api(`/api/test/${el.dataset.test}`,{});notice(result.message);}finally{el.disabled=false;await refresh();}})));
-  const readinessButton=$('[data-test="model-readiness"]');
-  if(readinessButton)readinessButton.addEventListener('click',action(async()=>{
-    readinessButton.disabled=true;renderReadiness(null);
-    try{
-      const value=$('#model-form').elements.key.value.trim();
-      renderReadiness(await api('/api/model/readiness',value?{value}:{}));
-    }catch(error){renderReadinessError(error.message);}
-    finally{readinessButton.disabled=false;}
-  }));
+  document.querySelectorAll('[data-test]').forEach(el=>el.addEventListener('click',action(async()=>{
+    el.disabled=true;if(el.dataset.test==='model')renderReadiness(null);
+    try{const result=await api('/api/test/'+el.dataset.test,{});if(el.dataset.test==='model')renderReadiness(result);else notice(result.message);}
+    catch(error){if(el.dataset.test==='model')renderReadinessError(error.message);else throw error;}
+    finally{el.disabled=false;await refresh();}
+  })));
   $('#research-form').elements.search_provider.addEventListener('change',()=>{$('#tavily-fields').hidden=$('#research-form').elements.search_provider.value!=='tavily';});
   $('#research-form').elements.sec_company_filings_enabled.addEventListener('change',event=>{event.target.dataset.userSelected='true';updateSecAvailability();});
   $('#research-form').elements.sec_contact.addEventListener('input',event=>{

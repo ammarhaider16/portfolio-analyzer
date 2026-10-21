@@ -47,13 +47,7 @@ class Settings(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     model_enabled: bool = False
     search_provider: Literal["tavily", "keyless", "disabled"] = "keyless"
-    # market_data_enabled controls research-time enrichment (daily closes and history
-    # during an analysis run); auto_prices_enabled instead polls quotes on a schedule
-    # and keeps the saved portfolio's prices current. Manual/CSV prices remain an
-    # offline fallback when both are off.
-    market_data_enabled: bool = False
-    auto_prices_enabled: bool = True
-    price_refresh_minutes: int = Field(default=15, ge=1, le=1440)
+    price_refresh_seconds: int = Field(default=60, ge=15, le=86400)
     primary_feeds_enabled: bool = True
     sec_company_filings_enabled: bool = False
     ticker_news_enabled: bool = True
@@ -121,6 +115,14 @@ def externally_managed() -> set[str]:
 def load_settings(directory: Path) -> Settings:
     path = directory / "settings.json"
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    retired = any(key in data for key in ('auto_prices_enabled','market_data_enabled','price_refresh_minutes'))
+    data.pop('auto_prices_enabled',None)
+    data.pop('market_data_enabled',None)
+    minutes = data.pop('price_refresh_minutes',None)
+    if minutes is not None and 'price_refresh_seconds' not in data:
+        data['price_refresh_seconds'] = 60 if minutes == 15 else int(minutes)*60
+    if retired:
+        save_settings(directory, Settings.model_validate(data))
     for key in externally_managed():
         value = os.environ["PORTFOLIO_SETTING_" + key.upper()]
         try:
