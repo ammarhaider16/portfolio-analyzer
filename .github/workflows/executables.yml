@@ -1,0 +1,41 @@
+name: Build executable previews
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            architecture: x86_64
+            executable: dist/betafolio-windows-x86_64/Betafolio/Betafolio.exe
+            archive: dist/betafolio-windows-x86_64.zip
+          - os: macos-15
+            architecture: arm64
+            executable: dist/betafolio-macos-arm64/betafolio/betafolio
+            archive: dist/betafolio-macos-arm64.zip
+          - os: macos-15-intel
+            architecture: x86_64
+            executable: dist/betafolio-macos-x86_64/betafolio/betafolio
+            archive: dist/betafolio-macos-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --group packaging --python 3.12
+      - name: Verify native architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: uv run --no-sync python -c "import os, platform; assert platform.machine().lower().replace('amd64', 'x86_64') == os.environ['EXPECTED_ARCH']"
+      - run: uv run --no-sync python scripts/build-executables.py
+      - run: uv run --no-sync python scripts/smoke-executable.py "${{ matrix.executable }}" --archive "${{ matrix.archive }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: betafolio-${{ matrix.os }}-${{ matrix.architecture }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error

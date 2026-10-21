@@ -32,6 +32,7 @@ betafolio = "betafolio.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1"]
+packaging = ["pyinstaller>=6,<7"]
 
 [build-system]
 requires = ["hatchling"]
@@ -42,7 +43,7 @@ packages = ["src/betafolio"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-  "/src", "/tests", "/docs", "/examples", "/scripts",
+  "/src", "/tests", "/docs", "/examples", "/scripts", "/packaging",
   "/README.md", "/LICENSE", "/pyproject.toml", "/uv.lock", "/Dockerfile", "/compose.yaml",
 ]
 exclude = ["/docs/security-review*", "/docs/security-dependency-audit*"]
