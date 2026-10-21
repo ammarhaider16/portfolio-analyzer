@@ -3,12 +3,51 @@ on: [push, pull_request]
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            architecture: x86_64
+          - os: windows-latest
+            architecture: x86_64
+          - os: macos-15
+            architecture: arm64
+          - os: macos-15-intel
+            architecture: x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen --group dev --python 3.12
+      - name: Verify native Python architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: uv run python -c "import os, platform; actual = platform.machine().lower().replace('amd64', 'x86_64'); print(platform.platform(), actual); assert actual == os.environ['EXPECTED_ARCH'], actual"
       - run: uv run pytest -q
       - run: uv run ruff check src tests
+      - name: Offline CLI with a data path containing spaces
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import tempfile
+
+          env = {
+              key: value for key, value in os.environ.items()
+              if not key.startswith(("PORTFOLIO_", "LANGCHAIN_", "LANGSMITH_"))
+              and key not in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LITELLM_API_KEY"}
+          }
+          with tempfile.TemporaryDirectory(prefix="Betafolio smoke ") as directory:
+              result = subprocess.run(
+                  [sys.executable, "-m", "betafolio", "--data-dir", directory,
+                   "analyze", "--demo", "--offline"],
+                  capture_output=True, text=True, timeout=60, env=env,
+              )
+              assert result.returncode == 0, result.stderr
+              report = json.loads(result.stdout)
+              assert report["status"] == "success", report["status"]
+              assert report["metrics"]["known_value"] == "19450"
+          PY
