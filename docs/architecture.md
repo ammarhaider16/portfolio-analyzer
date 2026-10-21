@@ -1,6 +1,12 @@
 # Research architecture
 
-Betafolio separates a read-only research engine from portfolio editing, scheduling, persistence and optional email delivery. The latest saved manual, CSV or Excel portfolio is the input to scheduled runs. Imports remain editable drafts until saved; quantities and cash are never guessed.
+Betafolio combines a standalone portfolio research engine with a local browser command center for portfolios, connections, runs, reports, and agent activity. The engine accepts an explicit `AnalysisRequest` and dependencies; the application layer handles editable portfolio drafts, persistence, connection preflight, scheduling, and optional email. The latest saved manual, CSV, or Excel portfolio is the input to scheduled runs. Imports remain editable drafts until saved, and missing quantities are never guessed.
+
+## Application flow
+
+Before a non-demo research run, the application checks the configured model and research sources. A model test validates tool use and structured output. A source test records per-source outcomes; a passed or empty result counts as working. These checks are cached against the relevant configuration and secret revision and rerun after those values change. Research is blocked until a model and at least one working source are available.
+
+The application stores run state, reports, and observed activity. Portfolio presents run progress and report history; Activity exposes tool calls and outcomes without private model reasoning. The command-line interface and browser dashboard both use the same analysis engine.
 
 ## Analyst workflow
 
@@ -12,6 +18,8 @@ The tools are `search_news(query, symbol="")`, `read_article(source_id)` and `ge
 
 ## Prices
 
+A background worker refreshes saved prices every 60 seconds by default, configurable in seconds. Opening the dashboard reads cached quotes. Research refreshes prices and history automatically; neither behavior requires a user toggle.
+
 The provider uses regular-session price, previous close and the provider observation timestamp. Daily-history fallback retains the actual session date and does not invent an observation timestamp. New quotes cannot replace a later saved session or timestamp. Quote retrieval time is separate from price observation time and drives cache TTL only.
 
 The XNYS calendar determines the current/latest open session, including pre-open, weekends and holidays. Stale or undated prices remain usable for valuation but are excluded from current-session daily changes. Position quantities, cash and portfolio snapshot time are preserved during price refresh. This session policy currently targets US-listed assets.
@@ -19,17 +27,17 @@ The XNYS calendar determines the current/latest open session, including pre-open
 ## Interfaces
 
 ```python
-from betafolio.engine import EngineDependencies, analyze_portfolio
-from betafolio.models import AnalysisRequest
+from betafolio import AnalysisRequest, EngineDependencies, analyze_portfolio
+from betafolio.agent import create_research_tool
 
 request = AnalysisRequest.model_validate_json(open("examples/request.json").read())
 result = await analyze_portfolio(request, EngineDependencies())
 print(result.model_dump_json(indent=2))
 ```
 
-An empty dependency set provides offline calculations. `build_dependencies(settings, secrets)` enables configured providers. `create_research_tool(dependencies)` exposes the same engine as a read-only LangChain subagent; a trading parent owns any execution decisions. See `examples/subagent.py` and the generated JSON schemas. Result schema version 2.0 replaces findings and source-bound summary objects with text and model-chosen sections; development builds do not keep that obsolete report contract.
+An empty dependency set provides offline calculations. Application configuration builds dependencies for enabled providers. `create_research_tool(dependencies)` exposes the same engine as a LangChain subagent; a parent agent owns any execution decisions. See `examples/subagent.py` and the generated JSON schemas. Result schema version 2.0 replaces findings and source-bound summary objects with text and model-chosen sections; development builds do not keep that obsolete report contract.
 
-`POST /api/runs` accepts a supplied `analysis` or the latest `stored` portfolio. `GET /api/runs/{id}` exposes progress and results. Research API tokens cannot mutate portfolios, import files, configure the app or send email. The dashboard owner can import/edit/save and explicitly request delivery. Email and scheduling are optional.
+`POST /api/runs` accepts a supplied `analysis` or the latest `stored` portfolio. `GET /api/runs/{id}` exposes progress and results. Research API tokens cannot mutate portfolios, import files, configure the app, or send email. The dashboard owner can import, edit, and save portfolios and explicitly request delivery. Email and scheduling are optional.
 
 ## Operational controls
 
