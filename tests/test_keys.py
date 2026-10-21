@@ -6,10 +6,10 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer import agent, web
-from portfolio_analyzer.config import ModelConfig, Settings, save_settings
-from portfolio_analyzer.service import create_model
-from portfolio_analyzer.web import create_app
+from betafolio import agent, web
+from betafolio.config import ModelConfig, Settings, save_settings
+from betafolio.service import create_model
+from betafolio.web import create_app
 
 
 class FakeKeyring:
@@ -161,7 +161,7 @@ def test_test_endpoint_uses_value_without_persisting(tmp_path, monkeypatch):
         return object()
 
     async def fake_generate(model, request, metrics, sources, **kwargs):
-        from portfolio_analyzer.models import ResearchNarrative
+        from betafolio.models import ResearchNarrative
         return ResearchNarrative(executive_summary="Ready")
 
     monkeypatch.setattr(web, 'create_model', fake_create)

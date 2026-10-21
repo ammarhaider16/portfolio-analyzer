@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from portfolio_analyzer import providers
+from betafolio import providers
 
 
 def fake_transport(monkeypatch, responses):

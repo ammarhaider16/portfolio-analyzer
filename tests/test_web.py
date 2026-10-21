@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer.models import AnalysisResult
-from portfolio_analyzer.secrets import SecretStore
-from portfolio_analyzer.web import create_app
+from betafolio.models import AnalysisResult
+from betafolio.secrets import SecretStore
+from betafolio.web import create_app
 
 
 def read_static(name):
-    return (Path(__file__).parents[1] / 'src/portfolio_analyzer' / 'static' / name).read_text(encoding='utf-8')
+    return (Path(__file__).parents[1] / 'src/betafolio' / 'static' / name).read_text(encoding='utf-8')
 
 
 @pytest.fixture(autouse=True)
@@ -50,7 +50,7 @@ def test_sec_contact_save_validation_and_first_enable(tmp_path):
 
 
 def test_search_test_persists_each_source_without_masking_skips(tmp_path, monkeypatch):
-    from portfolio_analyzer import providers
+    from betafolio import providers
 
     async def probe(*args, **kwargs):
         return {'search': {'status': 'passed', 'reason': '', 'tested_at': '2026-10-19T12:00:00Z'},
@@ -241,9 +241,9 @@ def test_non_ascii_owner_password_supported(tmp_path, monkeypatch):
 
 
 def test_research_token_can_read_research_cancel_but_cannot_mutate_or_email(tmp_path, monkeypatch):
-    from portfolio_analyzer import service as service_module
-    from portfolio_analyzer.config import Settings, save_settings
-    from portfolio_analyzer.delivery import SMTPConfig
+    from betafolio import service as service_module
+    from betafolio.config import Settings, save_settings
+    from betafolio.delivery import SMTPConfig
     monkeypatch.setenv('PORTFOLIO_PUBLIC_URL', 'https://portfolio.example')
     monkeypatch.setenv('PORTFOLIO_SECRET_OWNER_PASSWORD', 'owner-password-for-tests-only')
     monkeypatch.setenv('PORTFOLIO_SECRET_API_TOKEN', 'restricted-research-test-token')
@@ -273,8 +273,8 @@ def test_research_token_can_read_research_cancel_but_cannot_mutate_or_email(tmp_
 
 
 def test_model_connection_probe_uses_real_portfolio_metrics(tmp_path, monkeypatch):
-    from portfolio_analyzer import agent, web
-    from portfolio_analyzer.models import ResearchNarrative
+    from betafolio import agent, web
+    from betafolio.models import ResearchNarrative
     marker = object()
     monkeypatch.setattr(web, 'create_model', lambda *args: marker)
     calls = []
@@ -342,7 +342,7 @@ def test_model_key_delete_targets_the_active_provider_slot(tmp_path, isolated_cr
 
 
 def test_delete_run_refuses_active_and_removes_finished(tmp_path):
-    from portfolio_analyzer.storage import Store
+    from betafolio.storage import Store
     store = Store(tmp_path)
     assert store.create_run('active-run')
     assert store.delete_run('active-run') is False
@@ -352,7 +352,7 @@ def test_delete_run_refuses_active_and_removes_finished(tmp_path):
 
 
 def test_safe_error_reason_maps_status_and_redacts():
-    from portfolio_analyzer.web import safe_error_reason
+    from betafolio.web import safe_error_reason
 
     class Unauthorized(Exception):
         status_code = 401
@@ -364,7 +364,7 @@ def test_safe_error_reason_maps_status_and_redacts():
 
 
 def test_fr15_readiness_button_posts_and_shows_errors_verbatim(tmp_path, monkeypatch):
-    from portfolio_analyzer import web
+    from betafolio import web
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:
         token = csrf(client)
         html = client.get('/').text

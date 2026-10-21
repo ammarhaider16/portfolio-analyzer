@@ -1,7 +1,7 @@
 """Prepare clean input without dictating the analyst's editorial choices."""
 
-from portfolio_analyzer.models import Evidence
-from portfolio_analyzer.news import clean_text, source_hygiene
+from betafolio.models import Evidence
+from betafolio.news import clean_text, source_hygiene
 
 
 def test_input_removes_markup_and_widgets_but_keeps_opinion_and_fund_research():

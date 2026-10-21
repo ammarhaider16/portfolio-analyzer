@@ -4,9 +4,9 @@ import json
 from datetime import datetime, timezone
 
 
-import portfolio_analyzer.providers as providers
-from portfolio_analyzer.config import Settings
-from portfolio_analyzer.providers import (CompositeResearchProvider, SecFilingsResearchProvider,
+import betafolio.providers as providers
+from betafolio.config import Settings
+from betafolio.providers import (CompositeResearchProvider, SecFilingsResearchProvider,
                                           TickerNewsFeedProvider)
 
 
@@ -226,8 +226,8 @@ def test_sec_filings_abstain_without_contact(monkeypatch):
 
 
 def test_build_dependencies_composes_official_and_news_providers(tmp_path):
-    from portfolio_analyzer.secrets import SecretStore
-    from portfolio_analyzer.service import build_dependencies
+    from betafolio.secrets import SecretStore
+    from betafolio.service import build_dependencies
     settings = Settings(search_provider="keyless", sec_contact="Test Contact test@example.com")
     dependencies = build_dependencies(settings, SecretStore(tmp_path, server=True))
     assert isinstance(dependencies.research, CompositeResearchProvider)
@@ -237,8 +237,8 @@ def test_build_dependencies_composes_official_and_news_providers(tmp_path):
 
 
 def test_build_dependencies_disabled_has_no_research(tmp_path):
-    from portfolio_analyzer.secrets import SecretStore
-    from portfolio_analyzer.service import build_dependencies
+    from betafolio.secrets import SecretStore
+    from betafolio.service import build_dependencies
     settings = Settings(search_provider="disabled")
     dependencies = build_dependencies(settings, SecretStore(tmp_path, server=True))
     assert dependencies.research is None

@@ -6,8 +6,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer.secrets import SecretStore
-from portfolio_analyzer.web import create_app
+from betafolio.secrets import SecretStore
+from betafolio.web import create_app
 
 ORIGIN = 'https://portfolio.example'
 PASSWORD = 'fixture-owner-password-for-security'

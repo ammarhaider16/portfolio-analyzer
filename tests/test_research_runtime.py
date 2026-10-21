@@ -2,8 +2,8 @@
 
 import asyncio
 from datetime import datetime, timezone
-from portfolio_analyzer.models import AnalysisRequest, PortfolioSnapshot, Evidence
-from portfolio_analyzer.research_runtime import ResearchRuntime
+from betafolio.models import AnalysisRequest, PortfolioSnapshot, Evidence
+from betafolio.research_runtime import ResearchRuntime
 
 
 def test_news_tool_prepares_article_content_without_a_grade_checklist(monkeypatch):
@@ -22,7 +22,7 @@ def test_news_tool_prepares_article_content_without_a_grade_checklist(monkeypatc
     async def retrieve(url):
         return "The company announced a new investment in production."
 
-    monkeypatch.setattr("portfolio_analyzer.providers.retrieve_public_text", retrieve)
+    monkeypatch.setattr("betafolio.providers.retrieve_public_text", retrieve)
 
     async def exercise():
         runtime = ResearchRuntime(

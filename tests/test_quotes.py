@@ -6,12 +6,12 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer.config import Settings
-from portfolio_analyzer.models import PortfolioSnapshot, Position
-from portfolio_analyzer.providers import YFinanceMarketDataProvider
-from portfolio_analyzer.service import QuoteService
-from portfolio_analyzer.storage import Store
-from portfolio_analyzer.web import create_app
+from betafolio.config import Settings
+from betafolio.models import PortfolioSnapshot, Position
+from betafolio.providers import YFinanceMarketDataProvider
+from betafolio.service import QuoteService
+from betafolio.storage import Store
+from betafolio.web import create_app
 
 
 def settings(**overrides):

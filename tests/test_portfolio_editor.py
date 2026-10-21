@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer.imports import validate_portfolio_snapshot
-from portfolio_analyzer.models import PortfolioSnapshot, Position
-from portfolio_analyzer.web import create_app
+from betafolio.imports import validate_portfolio_snapshot
+from betafolio.models import PortfolioSnapshot, Position
+from betafolio.web import create_app
 
 
 NODE_FALLBACK = Path('/mnt/c/Program Files/nodejs/node.exe')
@@ -31,7 +31,7 @@ def run_js(harness):
     node, to_node_path = find_node()
     if not node:
         pytest.skip('Node is required to exercise browser JavaScript')
-    script = Path(__file__).parents[1] / 'src/portfolio_analyzer/static/app.js'
+    script = Path(__file__).parents[1] / 'src/betafolio/static/app.js'
     result = subprocess.run([node, '-e', harness, to_node_path(script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 

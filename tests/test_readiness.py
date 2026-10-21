@@ -10,9 +10,9 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from portfolio_analyzer.secrets import SecretStore
-from portfolio_analyzer.service import probe_model_readiness, readiness_ok
-from portfolio_analyzer.web import create_app
+from betafolio.secrets import SecretStore
+from betafolio.service import probe_model_readiness, readiness_ok
+from betafolio.web import create_app
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +115,7 @@ def test_readiness_errors_do_not_expose_provider_messages():
 
 
 def test_fr15_endpoint_contract(tmp_path, monkeypatch):
-    from portfolio_analyzer import service as service_module
+    from betafolio import service as service_module
     fake = FakeChatModel(script=[{"tool_calls": tool_call()}, {"tool_calls": final_call()}])
     monkeypatch.setattr(service_module, 'create_model', lambda *args, **kwargs: fake)
     with TestClient(create_app(tmp_path), base_url='http://127.0.0.1:8000') as client:

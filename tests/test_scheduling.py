@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from portfolio_analyzer.scheduling import SchedulePolicy, latest_eligible_run, next_session_run
+from betafolio.scheduling import SchedulePolicy, latest_eligible_run, next_session_run
 
 
 def ny(value):

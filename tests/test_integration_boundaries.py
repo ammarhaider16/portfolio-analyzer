@@ -7,9 +7,9 @@ from decimal import Decimal
 import httpx
 import pandas as pd
 from langchain_openai import ChatOpenAI
-from portfolio_analyzer.engine import EngineDependencies, analyze_portfolio
-from portfolio_analyzer.models import AnalysisRequest, PortfolioSnapshot, Position, Evidence
-from portfolio_analyzer.providers import YFinanceMarketDataProvider, expected_market_session
+from betafolio.engine import EngineDependencies, analyze_portfolio
+from betafolio.models import AnalysisRequest, PortfolioSnapshot, Position, Evidence
+from betafolio.providers import YFinanceMarketDataProvider, expected_market_session
 
 
 def test_current_quote_wins_over_previous_day_history(monkeypatch):
@@ -30,7 +30,7 @@ def test_current_quote_wins_over_previous_day_history(monkeypatch):
             return pd.DataFrame({"Close": [58.82]}, index=pd.to_datetime(["2026-10-16"]))
 
     monkeypatch.setattr(yf, "Ticker", lambda symbol: Ticker())
-    monkeypatch.setattr("portfolio_analyzer.providers.expected_market_session", lambda *args: "2026-10-19")
+    monkeypatch.setattr("betafolio.providers.expected_market_session", lambda *args: "2026-10-19")
     quotes = asyncio.run(YFinanceMarketDataProvider().quotes(["SPUS"]))
     assert quotes["SPUS"]["trading_date"] == "2026-10-19"
     assert quotes["SPUS"]["price"] == Decimal("59.21") and quotes["SPUS"]["previous_close"] == Decimal(
@@ -63,7 +63,7 @@ def test_actual_sdk_can_use_tools_and_finalize_in_its_own_structure(monkeypatch)
     async def retrieve(url):
         return "Apple announced an investment in production."
 
-    monkeypatch.setattr("portfolio_analyzer.providers.retrieve_public_text", retrieve)
+    monkeypatch.setattr("betafolio.providers.retrieve_public_text", retrieve)
 
     def respond(request):
         payload = json.loads(request.content)
@@ -134,7 +134,7 @@ def test_actual_sdk_can_use_tools_and_finalize_in_its_own_structure(monkeypatch)
 
 
 def test_price_refresh_never_overwrites_a_newer_saved_observation():
-    from portfolio_analyzer.providers import quote_is_newer
+    from betafolio.providers import quote_is_newer
 
     position = Position(
         symbol="SPUS",

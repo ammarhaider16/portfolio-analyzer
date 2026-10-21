@@ -1,8 +1,8 @@
 """Report contract: editorial freedom, safe output and email privacy."""
 
 from datetime import datetime, timezone
-from portfolio_analyzer.delivery import render_report
-from portfolio_analyzer.models import AnalysisResult, ReportSection
+from betafolio.delivery import render_report
+from betafolio.models import AnalysisResult, ReportSection
 
 
 def report():

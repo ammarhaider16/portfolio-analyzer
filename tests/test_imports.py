@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 import pytest
-from portfolio_analyzer.imports import parse_holdings_csv
+from betafolio.imports import parse_holdings_csv
 
 
 def test_import_cash_and_coverage():

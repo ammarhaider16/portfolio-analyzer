@@ -3,8 +3,8 @@
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
-from portfolio_analyzer.engine import EngineDependencies, analyze_portfolio
-from portfolio_analyzer.models import (
+from betafolio.engine import EngineDependencies, analyze_portfolio
+from betafolio.models import (
     AnalysisRequest,
     PortfolioSnapshot,
     Position,
@@ -49,7 +49,7 @@ def test_analyst_report_is_not_rewritten_or_rejected_for_missing_citations(monke
             ],
         )
 
-    monkeypatch.setattr("portfolio_analyzer.agent.generate_narrative", narrative)
+    monkeypatch.setattr("betafolio.agent.generate_narrative", narrative)
     result = asyncio.run(
         analyze_portfolio(AnalysisRequest(snapshot=snapshot()), EngineDependencies(model=object()))
     )

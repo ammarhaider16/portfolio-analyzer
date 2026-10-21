@@ -4,14 +4,14 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from portfolio_analyzer.config import Settings, load_settings
-from portfolio_analyzer import providers
-from portfolio_analyzer.providers import (
+from betafolio.config import Settings, load_settings
+from betafolio import providers
+from betafolio.providers import (
     CompositeResearchProvider, PrimaryFeedResearchProvider, SecFilingsResearchProvider,
     SourceHTTPError, TickerNewsFeedProvider, probe_research_sources, source_diagnostics,
     supports_market_wide,
 )
-from portfolio_analyzer.models import Evidence
+from betafolio.models import Evidence
 
 
 def test_contact_defaults_and_validation():

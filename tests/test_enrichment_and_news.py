@@ -6,11 +6,11 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 
-from portfolio_analyzer.engine import EngineDependencies, analyze_portfolio
-from portfolio_analyzer.enrichment import PortfolioEnrichmentAgent
-from portfolio_analyzer.models import AnalysisRequest, PortfolioSnapshot
-from portfolio_analyzer.imports import DraftPosition
-from portfolio_analyzer.web import create_app
+from betafolio.engine import EngineDependencies, analyze_portfolio
+from betafolio.enrichment import PortfolioEnrichmentAgent
+from betafolio.models import AnalysisRequest, PortfolioSnapshot
+from betafolio.imports import DraftPosition
+from betafolio.web import create_app
 
 
 def test_enrichment_preserves_user_prices_and_missing_quantities():
@@ -63,8 +63,8 @@ def test_enrichment_route_does_not_save_draft(tmp_path, monkeypatch):
 
 def _feed_research(monkeypatch, *rows, resolve=None):
     """A real TickerNewsFeedProvider over stubbed feed responses; never the network."""
-    import portfolio_analyzer.providers as providers
-    from portfolio_analyzer.providers import TickerNewsFeedProvider
+    import betafolio.providers as providers
+    from betafolio.providers import TickerNewsFeedProvider
     from email.utils import format_datetime
     body = '<?xml version="1.0"?><rss version="2.0"><channel>' + "".join(
         f"<item><title>{title}</title><link>{link}</link><description>{description}</description>"

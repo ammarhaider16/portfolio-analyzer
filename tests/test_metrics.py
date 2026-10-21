@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import pytest
-from portfolio_analyzer.models import PortfolioSnapshot, Position
-from portfolio_analyzer.metrics import calculate_metrics
+from betafolio.models import PortfolioSnapshot, Position
+from betafolio.metrics import calculate_metrics
 
 
 def test_decimal_values_duplicates_and_partial_coverage():
@@ -19,7 +19,7 @@ def test_decimal_values_duplicates_and_partial_coverage():
 
 
 def test_historical_risk_reports_partial_coverage():
-    from portfolio_analyzer.metrics import historical_risk
+    from betafolio.metrics import historical_risk
     from datetime import timedelta
     snapshot = PortfolioSnapshot(as_of=datetime.now(timezone.utc), cash="100", positions=[
         Position(symbol="ABC", quantity="1", price="100"),
@@ -35,7 +35,7 @@ def test_historical_risk_reports_partial_coverage():
 
 
 def test_benchmark_estimate_uses_identical_dates_and_includes_cash():
-    from portfolio_analyzer.metrics import benchmark_comparison
+    from betafolio.metrics import benchmark_comparison
     from datetime import timedelta
     snapshot = PortfolioSnapshot(as_of=datetime.now(timezone.utc), cash="100", positions=[Position(symbol="ABC", quantity="1", price="100")])
     start = datetime(2026, 1, 1)

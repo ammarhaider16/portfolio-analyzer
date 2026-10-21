@@ -19,7 +19,7 @@ class SecretStore:
     def __init__(self, data_dir: Path, server: bool = False):
         self.data_dir = Path(data_dir)
         self.server = server
-        self.service = 'portfolio-analyzer:' + str(self.data_dir.resolve())
+        self.service = 'betafolio:' + str(self.data_dir.resolve())
         self._cache: dict[str, str | None] = {}
         self._cache_at = 0.0
         self._metadata_path = self.data_dir / 'secret_metadata.json'

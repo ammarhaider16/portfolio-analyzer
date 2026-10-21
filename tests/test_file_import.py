@@ -6,8 +6,8 @@ from io import BytesIO
 from datetime import datetime, timezone
 import openpyxl
 from fastapi.testclient import TestClient
-from portfolio_analyzer.imports import parse_holdings_file
-from portfolio_analyzer.web import create_app
+from betafolio.imports import parse_holdings_file
+from betafolio.web import create_app
 
 
 def test_excel_upload_returns_a_draft_and_never_saves(tmp_path):

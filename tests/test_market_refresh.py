@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from portfolio_analyzer.models import PortfolioSnapshot, Position
-from portfolio_analyzer.providers import YFinanceMarketDataProvider
+from betafolio.models import PortfolioSnapshot, Position
+from betafolio.providers import YFinanceMarketDataProvider
 
 
 async def test_prices_refresh_without_changing_manual_quantities_or_cash(monkeypatch):

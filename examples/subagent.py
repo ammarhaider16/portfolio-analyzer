@@ -7,10 +7,10 @@ import argparse
 import asyncio
 import json
 
-from portfolio_analyzer.agent import create_research_tool
-from portfolio_analyzer.demo import demo_snapshot
-from portfolio_analyzer.engine import EngineDependencies, analyze_portfolio
-from portfolio_analyzer.models import AnalysisRequest
+from betafolio.agent import create_research_tool
+from betafolio.demo import demo_snapshot
+from betafolio.engine import EngineDependencies, analyze_portfolio
+from betafolio.models import AnalysisRequest
 
 
 async def main(use_tool: bool = False) -> None:

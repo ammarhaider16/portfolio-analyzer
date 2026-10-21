@@ -2,9 +2,9 @@ import os
 import sys
 from types import SimpleNamespace
 import pytest
-from portfolio_analyzer.config import ModelConfig, Settings
-from portfolio_analyzer.secrets import SecretStore, SecretStorageError
-from portfolio_analyzer.service import MODEL_PROVIDER_SLOTS, resolve_model_key, resolve_secret
+from betafolio.config import ModelConfig, Settings
+from betafolio.secrets import SecretStore, SecretStorageError
+from betafolio.service import MODEL_PROVIDER_SLOTS, resolve_model_key, resolve_secret
 
 
 class FakeKeyring:

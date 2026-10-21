@@ -8,7 +8,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
 
 ```powershell
 uv sync --frozen --python 3.12
-uv run portfolio-analyzer serve
+uv run betafolio serve
 ```
 
 Open **http://127.0.0.1:8000**. The demonstration portfolio runs offline without a model key, email, or schedule; its prices are illustrative.
@@ -87,11 +87,11 @@ Use one dashboard instance per data directory.
 ## Immediate runs and subagents
 
 ```powershell
-uv run portfolio-analyzer analyze --demo --offline
-uv run portfolio-analyzer analyze --request examples/request.json
-uv run portfolio-analyzer analyze --format text
-uv run portfolio-analyzer diagnostics
-uv run portfolio-analyzer diagnostics --live
+uv run betafolio analyze --demo --offline
+uv run betafolio analyze --request examples/request.json
+uv run betafolio analyze --format text
+uv run betafolio diagnostics
+uv run betafolio diagnostics --live
 ```
 
 The request example contains illustrative prices and a fixed date: replace valuations and their timestamp together. `--offline` disables external providers. `--send` explicitly requests delivery to the configured verified owner. Without `--request` or `--demo`, the CLI reads the latest saved portfolio.
@@ -99,8 +99,8 @@ The request example contains illustrative prices and a fixed date: replace valua
 The core is reusable without the dashboard or storage:
 
 ```python
-from portfolio_analyzer import AnalysisRequest, EngineDependencies, analyze_portfolio
-from portfolio_analyzer.agent import create_research_tool
+from betafolio import AnalysisRequest, EngineDependencies, analyze_portfolio
+from betafolio.agent import create_research_tool
 request = AnalysisRequest.model_validate(your_request_dict)
 dependencies = EngineDependencies()  # Inject configured providers for network research
 result = await analyze_portfolio(request, dependencies)
@@ -132,7 +132,7 @@ The Docker image uses frozen uv dependencies, a nonroot user, and persistent `/d
 
 Create a private `deployment-secrets` directory with files named `owner_password`, `api_token`, `model_api_key_custom`, `tavily_api_key`, and `smtp_password`. The owner password must have at least 16 characters; use a long random API token. Optional provider files can be empty. The Compose example mounts a custom endpoint model key; for another provider, use its `PORTFOLIO_SECRET_MODEL_API_KEY_<PROVIDER>_FILE` variable and matching secret file. Keep permissions restrictive and never commit them.
 
-Set `PORTFOLIO_PUBLIC_URL` to your exact HTTPS origin, then run `docker compose up --build -d`. Sign in and configure providers; edit mounted credential files outside the dashboard. For non-Docker hosting, set `PORTFOLIO_SERVER_MODE=1`, the HTTPS origin, and owner secret, then run `uv run portfolio-analyzer serve --server --host 0.0.0.0` behind a protected reverse proxy.
+Set `PORTFOLIO_PUBLIC_URL` to your exact HTTPS origin, then run `docker compose up --build -d`. Sign in and configure providers; edit mounted credential files outside the dashboard. For non-Docker hosting, set `PORTFOLIO_SERVER_MODE=1`, the HTTPS origin, and owner secret, then run `uv run betafolio serve --server --host 0.0.0.0` behind a protected reverse proxy.
 
 Browser mutations require owner sessions and CSRF protection. Research clients use `Authorization: Bearer <API_TOKEN>` over HTTPS. Research tokens can request/read/cancel analyses; they cannot modify portfolios/settings, import portfolio files, or send email.
 

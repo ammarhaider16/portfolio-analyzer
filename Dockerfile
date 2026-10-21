@@ -8,4 +8,4 @@ COPY src ./src
 RUN uv sync --frozen --no-dev && useradd --create-home --uid 10001 portfolio && mkdir /data && chown portfolio:portfolio /data
 USER portfolio
 EXPOSE 8000
-CMD ["/app/.venv/bin/portfolio-analyzer", "serve", "--server", "--host", "0.0.0.0"]
+CMD ["/app/.venv/bin/betafolio", "serve", "--server", "--host", "0.0.0.0"]

@@ -19,8 +19,8 @@ The XNYS calendar determines the current/latest open session, including pre-open
 ## Interfaces
 
 ```python
-from portfolio_analyzer.engine import EngineDependencies, analyze_portfolio
-from portfolio_analyzer.models import AnalysisRequest
+from betafolio.engine import EngineDependencies, analyze_portfolio
+from betafolio.models import AnalysisRequest
 
 request = AnalysisRequest.model_validate_json(open("examples/request.json").read())
 result = await analyze_portfolio(request, EngineDependencies())

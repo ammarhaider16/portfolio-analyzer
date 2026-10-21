@@ -5,15 +5,15 @@ from decimal import Decimal
 
 import pytest
 
-from portfolio_analyzer import service as module
-from portfolio_analyzer.config import Settings, load_settings, save_settings
-from portfolio_analyzer.delivery import DeliveryOutcome, SMTPConfig
-from portfolio_analyzer.demo import demo_snapshot
-from portfolio_analyzer.engine import EngineDependencies
-from portfolio_analyzer.models import AnalysisResult, PortfolioSnapshot, Position
-from portfolio_analyzer.scheduling import SchedulePolicy
-from portfolio_analyzer.service import ApplicationService
-from portfolio_analyzer.storage import Store
+from betafolio import service as module
+from betafolio.config import Settings, load_settings, save_settings
+from betafolio.delivery import DeliveryOutcome, SMTPConfig
+from betafolio.demo import demo_snapshot
+from betafolio.engine import EngineDependencies
+from betafolio.models import AnalysisResult, PortfolioSnapshot, Position
+from betafolio.scheduling import SchedulePolicy
+from betafolio.service import ApplicationService
+from betafolio.storage import Store
 
 
 @pytest.fixture

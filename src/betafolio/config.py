@@ -111,7 +111,7 @@ class Settings(BaseModel):
 
 
 def data_directory() -> Path:
-    return Path(os.environ["PORTFOLIO_DATA_DIR"]) if "PORTFOLIO_DATA_DIR" in os.environ else user_data_path("portfolio-analyzer", appauthor=False)
+    return Path(os.environ["PORTFOLIO_DATA_DIR"]) if "PORTFOLIO_DATA_DIR" in os.environ else user_data_path("betafolio", appauthor=False)
 
 
 def externally_managed() -> set[str]:
